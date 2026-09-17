@@ -1,10 +1,9 @@
 ARG BUILD_FROM
 FROM ${BUILD_FROM}
 
-# ffmpeg for muxing, python for the bridge, curl to fetch MediaMTX,
-# git so pip can install the bridge package from the repo.
+# ffmpeg for muxing, python for the bridge, curl to fetch MediaMTX.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        python3 python3-pip ffmpeg curl ca-certificates git \
+        python3 python3-pip ffmpeg curl ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 # --- MediaMTX (media server) ---
@@ -24,9 +23,10 @@ RUN set -eux; \
     /usr/local/bin/mediamtx --version || true
 
 # --- the bridge package (single source of truth: installed from the repo) ---
+# Fetched as a source tarball (no git needed in the image).
 ARG BASEUS_REF=main
 RUN pip3 install --no-cache-dir --break-system-packages \
-        "baseus-cam-bridge @ git+https://github.com/pickeld/baseus-cam-bridge@${BASEUS_REF}"
+        "https://github.com/pickeld/baseus-cam-bridge/archive/${BASEUS_REF}.tar.gz"
 
 ENV BASEUS_RUNTIME_DIR=/data/run \
     MEDIAMTX_BIN=/usr/local/bin/mediamtx \
