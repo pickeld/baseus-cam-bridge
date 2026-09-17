@@ -1,0 +1,23 @@
+# Never commit real credentials or runtime state
+.env
+*.env
+!.env.example
+cameras.json
+mediamtx.yml
+run/
+*.log
+
+# Local media captures
+*.h264
+*.h265
+*.mp4
+*.jpg
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+build/
+dist/

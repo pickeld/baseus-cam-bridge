@@ -1,0 +1,23 @@
+[project]
+name = "baseus-cam-bridge"
+version = "0.1.0"
+description = "Local RTSP/HLS/WebRTC gateway for Baseus / XM P2P cameras"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "pickeld" }]
+dependencies = [
+    "aiopppp==0.2.3",
+    "pycryptodome>=3.20",
+    "requests>=2.31",
+]
+
+[project.scripts]
+baseus-bridge = "baseus_bridge.__main__:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["baseus_bridge"]

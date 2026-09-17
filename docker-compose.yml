@@ -1,0 +1,13 @@
+services:
+  baseus-cam-bridge:
+    build: .
+    image: ghcr.io/pickeld/baseus-cam-bridge:latest
+    container_name: baseus-cam-bridge
+    # Host networking is required so the bridge can reach your cameras' LAN P2P
+    # (UDP) ports and so RTSP/HLS/WebRTC are directly reachable. Linux only.
+    network_mode: host
+    env_file: .env
+    restart: unless-stopped
+    # tmpfs keeps the generated credentials file off disk.
+    tmpfs:
+      - /run/baseus:mode=700

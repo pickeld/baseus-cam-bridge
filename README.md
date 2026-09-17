@@ -1,0 +1,128 @@
+# Baseus Cam Bridge
+
+Turn your **Baseus Security** cameras (the ones that use the HomeStation base and
+the XM/PPPP cloud) into standard **RTSP / HLS / WebRTC** streams you can open in
+VLC, Home Assistant, Frigate, Blue Iris, or any normal video client — running
+entirely on your own network.
+
+These cameras don't expose RTSP/ONVIF themselves; they only talk to the vendor
+cloud over an encrypted P2P protocol. This project runs a small local gateway
+that logs in with **your own Baseus account**, discovers **your own cameras**, and
+republishes their live video locally. Nothing leaves your LAN except the initial
+login/device-list call to the Baseus cloud (the same call the official app makes).
+
+> Use this only with devices you own or are authorized to manage.
+
+---
+
+## What you get
+
+- One RTSP URL per camera, e.g. `rtsp://<host>:8554/living-room`
+- The same feeds as HLS (`http://<host>:8888/<cam>/index.m3u8`) and WebRTC
+  (`http://<host>:8889/<cam>`)
+- Automatic discovery of **all** cameras on your account
+- Battery-friendly: a camera is only contacted while something is watching it
+
+---
+
+## Quick start (Docker, recommended)
+
+You need a Linux host (a NAS, a Raspberry Pi, a mini-PC, etc.) on the **same
+network** as your cameras, with Docker installed.
+
+```bash
+git clone https://github.com/pickeld/baseus-cam-bridge.git
+cd baseus-cam-bridge
+
+cp .env.example .env
+# edit .env and put in your Baseus app email + password
+
+docker compose up -d
+```
+
+That's it. Check which URLs were created:
+
+```bash
+docker compose logs | grep rtsp://
+```
+
+Open one in VLC: **File → Open Network** → `rtsp://<your-host-ip>:8554/<camera>`.
+
+### First, list your cameras (optional sanity check)
+
+```bash
+docker compose run --rm baseus-cam-bridge python -m baseus_bridge discover
+```
+
+This prints your cameras (passwords redacted) so you can confirm login works.
+
+---
+
+## Run without Docker
+
+```bash
+python3 -m venv .venv && . .venv/bin/activate
+pip install -r requirements.txt
+# also install ffmpeg and mediamtx and put them on your PATH
+
+export BASEUS_ACCOUNT="you@example.com"
+export BASEUS_PASSWORD="your-password"
+export BASEUS_RUNTIME_DIR="./run"        # writable dir for generated config
+python -m baseus_bridge serve
+```
+
+---
+
+## Configuration
+
+All settings are environment variables (see `.env.example`):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `BASEUS_ACCOUNT` | – | Your Baseus app login (email/phone) |
+| `BASEUS_PASSWORD` | – | Your Baseus app password |
+| `BASEUS_REGION` | `AUTO` | `AUTO`, or force `US` / `EU` / `AU` |
+| `BASEUS_COUNTRYCODE` | `1` | Phone country code used at login |
+| `BASEUS_INCLUDE_OFFLINE` | `1` | Also create paths for offline cameras |
+| `BASEUS_RTSP_PORT` | `8554` | RTSP port |
+| `BASEUS_HLS_PORT` | `8888` | HLS port |
+| `BASEUS_WEBRTC_PORT` | `8889` | WebRTC port |
+
+Your credentials live only in `.env` (git-ignored) and a runtime file inside the
+container (`tmpfs`, mode 600). Nothing sensitive is written to the repo.
+
+---
+
+## How it works
+
+```
+Baseus cloud  --login/device-list-->  orchestrator
+                                          |  (discovers cameras + local creds)
+                                          v
+camera (P2P/LAN)  -->  bridge (Python)  -->  ffmpeg  -->  MediaMTX  -->  rtsp://.../<cam>
+```
+
+- `baseus_bridge.cloud` performs the same login + device-list as the app.
+- `baseus_bridge.bridge` holds one camera's live session and outputs H.264.
+- `baseus_bridge.orchestrator` writes a MediaMTX config where each camera is a
+  `runOnDemand` path, so bridges start only when a client connects.
+
+See [`docs/PROTOCOL.md`](docs/PROTOCOL.md) for protocol notes.
+
+---
+
+## Troubleshooting
+
+- **No cameras found** — double-check the account/password and try setting
+  `BASEUS_REGION` explicitly.
+- **Stream won't open** — the camera may be offline/asleep (battery models wake on
+  demand; give it ~10–15s on first connect). Confirm the host can reach the
+  camera's LAN IP.
+- **Docker on macOS/Windows** — `network_mode: host` behaves differently there;
+  a Linux host is strongly recommended for LAN P2P.
+
+---
+
+## License
+
+MIT — see [LICENSE](LICENSE).
