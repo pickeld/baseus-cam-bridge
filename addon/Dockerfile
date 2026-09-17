@@ -1,9 +1,10 @@
 ARG BUILD_FROM
 FROM ${BUILD_FROM}
 
-# ffmpeg for muxing, python for the bridge, curl to fetch MediaMTX.
+# ffmpeg for muxing, python for the bridge, curl to fetch MediaMTX,
+# git so pip can install the bridge package from the repo.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        python3 python3-pip ffmpeg curl ca-certificates \
+        python3 python3-pip ffmpeg curl ca-certificates git \
     && rm -rf /var/lib/apt/lists/*
 
 # --- MediaMTX (media server) ---
