@@ -52,6 +52,16 @@ class CameraBridge(BinarySession):
         log(">>> PPPP up; logging in")
         asyncio.create_task(self.run())
 
+    def on_receive(self, data):
+        # aiopppp's parse_packet raises ValueError on PPPP packet types it does
+        # not enumerate (e.g. 0x43) instead of falling back to a generic packet.
+        # The camera emits some of these; they are non-essential control frames,
+        # so drop them quietly rather than spamming the async read callback.
+        try:
+            super().on_receive(data)
+        except ValueError:
+            self._dropped_pkts = getattr(self, "_dropped_pkts", 0) + 1
+
     async def _send_cmd(self, cmd, obj):
         # NB: named _send_cmd (not _send) to avoid shadowing aiopppp's
         # BinarySession._send(pkt), which the library calls during its handshake.
