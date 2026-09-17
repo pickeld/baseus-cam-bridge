@@ -52,7 +52,9 @@ class CameraBridge(BinarySession):
         log(">>> PPPP up; logging in")
         asyncio.create_task(self.run())
 
-    async def _send(self, cmd, obj):
+    async def _send_cmd(self, cmd, obj):
+        # NB: named _send_cmd (not _send) to avoid shadowing aiopppp's
+        # BinarySession._send(pkt), which the library calls during its handshake.
         idx = self.outgoing_command_idx
         self.outgoing_command_idx += 1
         await self.send(DrwPkt(Channel.Command.value, idx, P.command_json(cmd, obj)))
@@ -82,20 +84,20 @@ class CameraBridge(BinarySession):
     async def _open_video(self):
         ch, sn = self.cam["channel"], self.cam["camera_sn"]
         if self.cam.get("is_homebase_child", True):
-            await self._send(P.CMD_HOMEBASE_LIVE_ENABLE,
-                             {"channel": ch, "list": [{"sn": sn, "streamType": 0}],
-                              "videoKeepAlive_2": 0})
+            await self._send_cmd(P.CMD_HOMEBASE_LIVE_ENABLE,
+                                 {"channel": ch, "list": [{"sn": sn, "streamType": 0}],
+                                  "videoKeepAlive_2": 0})
             await asyncio.sleep(2)
-        await self._send(P.CMD_OPENVIDEO,
-                         {"channel": ch, "camera_sn": sn,
-                          "streamType": 0, "videoKeepAlive_2": 0})
+        await self._send_cmd(P.CMD_OPENVIDEO,
+                             {"channel": ch, "camera_sn": sn,
+                              "streamType": 0, "videoKeepAlive_2": 0})
 
     async def run(self):
         await asyncio.sleep(0.5)
         user = self.cam["device_sn"]
         pw = self.cam["p2p_password"]
         rnd = "".join(str((int(time.time() * 1000) >> (i * 3)) % 10) for i in range(6))
-        await self._send(P.CMD_LOGIN, {
+        await self._send_cmd(P.CMD_LOGIN, {
             "username": user, "timestamp": int(time.time() * 1000), "random": rnd,
             "user_id": "", "auth": P.login_auth(user, rnd, pw),
             "video": 0, "mic": 0, "res": 1})
