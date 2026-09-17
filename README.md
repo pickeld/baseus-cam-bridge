@@ -25,6 +25,20 @@ login/device-list call to the Baseus cloud (the same call the official app makes
 
 ---
 
+## Install as a Home Assistant add-on (easiest for HA users)
+
+If you run Home Assistant OS/Supervised, install the bridge as an add-on so it
+runs on the HA host itself:
+
+1. **Settings → Add-ons → Add-on Store**, then the three-dot menu → **Repositories**.
+2. Add `https://github.com/pickeld/baseus-cam-bridge`.
+3. Install **Baseus Cam Bridge**, open **Configuration**, enter your Baseus
+   account + password, and **Start**.
+
+Streams are then at `rtsp://homeassistant.local:8554/<camera>`. Pair it with the
+[Baseus Security HACS integration](https://github.com/pickeld/baseus-home-assistant)
+for camera entities and sensors. See [`addon/DOCS.md`](addon/DOCS.md).
+
 ## Quick start (Docker, recommended)
 
 You need a Linux host (a NAS, a Raspberry Pi, a mini-PC, etc.) on the **same
@@ -55,6 +69,13 @@ docker compose run --rm baseus-cam-bridge python -m baseus_bridge discover
 ```
 
 This prints your cameras (passwords redacted) so you can confirm login works.
+
+To inspect everything the cloud reports about your devices (for mapping sensors,
+with all secrets redacted):
+
+```bash
+docker compose run --rm baseus-cam-bridge python -m baseus_bridge dump
+```
 
 ---
 

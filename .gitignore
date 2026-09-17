@@ -21,3 +21,7 @@ venv/
 *.egg-info/
 build/
 dist/
+
+# tooling state (not part of the project)
+.claude-flow/
+.tmp/

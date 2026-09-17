@@ -11,11 +11,14 @@ def main(argv=None):
     sub = ap.add_subparsers(dest="cmd")
     sub.add_parser("serve", help="discover cameras and run the MediaMTX server (default)")
     sub.add_parser("discover", help="log in and print discovered cameras (secrets redacted)")
+    sub.add_parser("dump", help="print the full cloud device-list JSON (secrets redacted)")
     args = ap.parse_args(argv)
     cmd = args.cmd or "serve"
     try:
         if cmd == "discover":
             orchestrator.print_discovery()
+        elif cmd == "dump":
+            orchestrator.print_raw_devices()
         else:
             orchestrator.serve()
     except KeyboardInterrupt:

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import stat
 import sys
@@ -114,3 +115,42 @@ def serve():
 def print_discovery():
     cams = discover()
     print(json.dumps([c.redacted() for c in cams], indent=2))
+
+
+# Keys whose *values* are credentials/identifiers and must never be printed.
+_SENSITIVE_KEY = re.compile(
+    r"(pass|pwd|token|auth|secret|p2p|(?<![a-z])key(?![a-z])|licen|access|"
+    r"refresh|session|cookie|sign(?!al)|ticket|account|email|phone|mobile|"
+    r"(?<![a-z])did(?![a-z])|(?<![a-z])sn(?![a-z])|serial|(?<![a-z])mac|"
+    r"(?<![a-z])ip(?![a-z])|(?<![a-z])lan|(?<![a-z])wan|ssid)",
+    re.I,
+)
+
+
+def _redact(obj):
+    """Recursively mask sensitive values while preserving all keys/structure."""
+    if isinstance(obj, dict):
+        out = {}
+        for k, v in obj.items():
+            if isinstance(v, (dict, list)):
+                out[k] = _redact(v)
+            elif _SENSITIVE_KEY.search(str(k)):
+                out[k] = "***"
+            else:
+                out[k] = v
+        return out
+    if isinstance(obj, list):
+        return [_redact(v) for v in obj]
+    return obj
+
+
+def print_raw_devices():
+    """Print the full cloud device-list JSON with sensitive values redacted.
+
+    Useful for mapping which sensors/controls a camera model exposes without
+    leaking credentials or identifiers into logs.
+    """
+    cloud = _cloud_from_env()
+    cloud.login()
+    resp = cloud.raw_device_list()
+    print(json.dumps(_redact(resp), indent=2, ensure_ascii=False))
