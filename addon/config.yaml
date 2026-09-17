@@ -1,5 +1,5 @@
 name: Baseus Cam Bridge
-version: "0.1.4"
+version: "0.1.5"
 slug: baseus_cam_bridge
 description: Local RTSP/HLS/WebRTC gateway for Baseus Security cameras
 url: https://github.com/pickeld/baseus-cam-bridge/tree/main/addon
