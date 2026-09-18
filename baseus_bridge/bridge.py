@@ -52,7 +52,7 @@ class CameraBridge(BinarySession):
     async def setup_device(self):
         self.device_is_ready.set()
         log(">>> PPPP up; logging in")
-        asyncio.create_task(self.run())
+        asyncio.create_task(self.run_monitor() if getattr(self, "monitor", False) else self.run())
 
     def on_receive(self, data):
         # aiopppp's parse_packet raises ValueError on PPPP packet types it does
@@ -92,6 +92,26 @@ class CameraBridge(BinarySession):
             except Exception:
                 pass
             self.logged_in.set()
+        if getattr(self, "monitor", False) and parsed:
+            self._log_command(*parsed)
+
+    def _log_command(self, cmd, entype, body):
+        """Decode + print one command-channel frame (secrets redacted)."""
+        from .orchestrator import _redact
+
+        data = P.aes_decrypt(self.key, body) if entype else body
+        js = None
+        if data[:1] == b"{":
+            try:
+                js = json.loads(data.decode("utf-8", "replace"))
+            except ValueError:
+                js = None
+        print(json.dumps({
+            "dir": "dev->app",
+            "cmd": cmd,
+            "enc": bool(entype),
+            "json": _redact(js) if isinstance(js, (dict, list)) else None,
+        }, ensure_ascii=False), flush=True)
 
     async def _open_video(self):
         ch, sn = self.cam["channel"], self.cam["camera_sn"]
@@ -104,7 +124,7 @@ class CameraBridge(BinarySession):
                              {"channel": ch, "camera_sn": sn,
                               "streamType": STREAM_TYPE, "videoKeepAlive_2": 0})
 
-    async def run(self):
+    async def _do_login(self) -> bool:
         await asyncio.sleep(0.5)
         user = self.cam["device_sn"]
         pw = self.cam["p2p_password"]
@@ -116,9 +136,23 @@ class CameraBridge(BinarySession):
         try:
             await asyncio.wait_for(self.logged_in.wait(), 8)
         except asyncio.TimeoutError:
-            log(">>> login timeout"); self.dead.set(); return
+            log(">>> login timeout"); self.dead.set(); return False
         if not self.login_ok:
-            log(">>> login failed"); self.dead.set(); return
+            log(">>> login failed"); self.dead.set(); return False
+        return True
+
+    async def run_monitor(self):
+        """Log in and passively log every command-channel frame (no video)."""
+        if not await self._do_login():
+            return
+        log(">>> login ok; MONITORING command channel.")
+        log(">>> Now toggle ONE setting in the Baseus app (e.g. the status light).")
+        while not self.dead.is_set():
+            await asyncio.sleep(5)
+
+    async def run(self):
+        if not await self._do_login():
+            return
         log(">>> login ok; opening video")
         await self._open_video()
         last = self.reasm.emitted
@@ -161,7 +195,7 @@ def resolve_camera(args) -> dict:
     }
 
 
-async def _main(cam: dict):
+async def _main(cam: dict, monitor: bool = False):
     log(f"discovering {cam['host']} ...")
     device = None
     for attempt in range(1, 4):
@@ -183,12 +217,22 @@ async def _main(cam: dict):
 
     session = CameraBridge(cam, device, on_disconnect=on_disc,
                            login="admin", password="admin")
+    session.monitor = monitor
     session.start()
     await session.dead.wait()
     log(">>> session ended")
     try:
         session.stop()
     except Exception:
+        pass
+
+
+def run_monitor_for(cam: dict):
+    """Connect to a camera and log the command channel until interrupted."""
+    cam.setdefault("is_homebase_child", cam.get("camera_sn") != cam.get("device_sn"))
+    try:
+        asyncio.run(_main(cam, monitor=True))
+    except KeyboardInterrupt:
         pass
 
 
@@ -202,12 +246,14 @@ def main(argv=None):
     ap.add_argument("--camera-sn")
     ap.add_argument("--homebase", action="store_true",
                     help="camera is behind a HomeStation base (default autodetect via --camera)")
+    ap.add_argument("--monitor", action="store_true",
+                    help="log the command channel instead of streaming video")
     args = ap.parse_args(argv)
     cam = resolve_camera(args)
     # default is_homebase_child true only when we have a distinct base SN
     cam.setdefault("is_homebase_child", cam["camera_sn"] != cam["device_sn"])
     try:
-        asyncio.run(_main(cam))
+        asyncio.run(_main(cam, monitor=args.monitor))
     except KeyboardInterrupt:
         pass
 

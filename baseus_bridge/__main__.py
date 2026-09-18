@@ -17,6 +17,10 @@ def main(argv=None):
     dc = sub.add_parser("decode-capture",
                         help="decode a pcap of the app<->device command channel (secrets redacted)")
     dc.add_argument("pcap", help="path to a classic .pcap capture file")
+    mon = sub.add_parser("monitor",
+                         help="live-monitor a camera's command channel (toggle a setting in the app)")
+    mon.add_argument("--camera", dest="slug", default=None,
+                     help="camera slug to monitor (default: first discovered)")
     args = ap.parse_args(argv)
     cmd = args.cmd or "serve"
     try:
@@ -29,6 +33,8 @@ def main(argv=None):
         elif cmd == "decode-capture":
             from . import capture
             capture.decode_capture(args.pcap)
+        elif cmd == "monitor":
+            orchestrator.monitor_commands(args.slug)
         else:
             orchestrator.serve()
     except KeyboardInterrupt:

@@ -199,6 +199,32 @@ def print_raw_devices():
     print(json.dumps(_redact(resp), indent=2, ensure_ascii=False))
 
 
+def monitor_commands(slug: str | None = None):
+    """Live-monitor a camera's command channel (decode setting-change frames).
+
+    Discovers your cameras, connects a P2P session, and prints every decoded
+    command-channel frame (secrets redacted). Toggle a setting in the Baseus app
+    while this runs to capture its command ID + payload.
+    """
+    cams = discover()
+    if not cams:
+        raise SystemExit("no cameras discovered")
+    cam = None
+    if slug:
+        cam = next((c for c in cams if c.slug == slug), None)
+        if cam is None:
+            raise SystemExit(f"camera slug {slug!r} not found")
+    else:
+        cam = cams[0]
+    log(f"[monitor] {cam.name} (channel {cam.channel}) on {cam.host}")
+    from . import bridge
+    bridge.run_monitor_for({
+        "host": cam.host, "device_sn": cam.device_sn, "p2p_password": cam.p2p_password,
+        "channel": cam.channel, "camera_sn": cam.camera_sn,
+        "is_homebase_child": cam.is_homebase_child,
+    })
+
+
 def _iter_devices(resp: dict):
     return ((resp.get("payload") or {}).get("device_list")) or []
 

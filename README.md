@@ -103,9 +103,20 @@ aren't cloud-settable with the tried conventions and would need deeper work.
 ### Learn the local set-commands by observing your own device
 
 Settings are sent to the HomeStation over the local P2P command channel. You can
-read the exact command IDs + JSON the official app uses by capturing that
-traffic on **your own network** and decoding it with the same crypto the bridge
-already uses (no app binaries are touched):
+read the exact command IDs + JSON the official app uses, decoded with the same
+crypto the bridge already uses (no app binaries are touched).
+
+**Easiest — live monitor (no Wireshark needed):**
+
+```bash
+python -m baseus_bridge monitor            # or: monitor --camera <slug>
+```
+
+Leave it running and **toggle one setting in the Baseus app** (e.g. the status
+light). If the HomeStation notifies connected sessions, you'll see a decoded
+line like `{"dir":"dev->app","cmd":306,"json":{"light_status":0}}`. Send that.
+
+**Definitive — packet capture (if the monitor sees nothing):**
 
 1. **Capture** the app↔HomeStation packets. Cleanest on UniFi: mirror the
    HomeStation's switch port and capture with Wireshark, or on any host on the
