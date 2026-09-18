@@ -1,5 +1,5 @@
 name: Baseus Cam Bridge
-version: "0.1.5"
+version: "0.1.6"
 slug: baseus_cam_bridge
 description: Local RTSP/HLS/WebRTC gateway for Baseus Security cameras
 url: https://github.com/pickeld/baseus-cam-bridge/tree/main/addon
@@ -28,6 +28,10 @@ options:
   country_code: "1"
   include_offline: true
   framerate: 25
+  stream_quality: hd
+  always_on: false
+  start_timeout: 60
+  close_after: 30
 schema:
   account: str
   password: password
@@ -35,3 +39,7 @@ schema:
   country_code: str
   include_offline: bool
   framerate: int(1,60)
+  stream_quality: list(hd|sd)
+  always_on: bool
+  start_timeout: int(10,180)
+  close_after: int(0,600)

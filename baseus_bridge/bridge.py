@@ -30,6 +30,8 @@ from . import protocol as P
 
 KEEPALIVE_SEC = 20
 CAMERAS_FILE = os.environ.get("BASEUS_CAMERAS_FILE", "/run/baseus/cameras.json")
+# 0 = main/HD stream, 1 = sub/SD stream. SD is lighter and often loads faster.
+STREAM_TYPE = int(os.environ.get("BASEUS_STREAM_TYPE", "0"))
 
 
 def log(*a):
@@ -95,12 +97,12 @@ class CameraBridge(BinarySession):
         ch, sn = self.cam["channel"], self.cam["camera_sn"]
         if self.cam.get("is_homebase_child", True):
             await self._send_cmd(P.CMD_HOMEBASE_LIVE_ENABLE,
-                                 {"channel": ch, "list": [{"sn": sn, "streamType": 0}],
+                                 {"channel": ch, "list": [{"sn": sn, "streamType": STREAM_TYPE}],
                                   "videoKeepAlive_2": 0})
-            await asyncio.sleep(2)
+            await asyncio.sleep(1)
         await self._send_cmd(P.CMD_OPENVIDEO,
                              {"channel": ch, "camera_sn": sn,
-                              "streamType": 0, "videoKeepAlive_2": 0})
+                              "streamType": STREAM_TYPE, "videoKeepAlive_2": 0})
 
     async def run(self):
         await asyncio.sleep(0.5)
@@ -161,10 +163,16 @@ def resolve_camera(args) -> dict:
 
 async def _main(cam: dict):
     log(f"discovering {cam['host']} ...")
-    try:
-        device = await find_device(cam["host"], timeout=15)
-    except Exception as e:
-        raise SystemExit(f"device discovery failed: {e}")
+    device = None
+    for attempt in range(1, 4):
+        try:
+            device = await find_device(cam["host"], timeout=10)
+            break
+        except Exception as e:  # noqa: BLE001 - report and retry
+            log(f">>> discovery attempt {attempt}/3 failed: {e}")
+            await asyncio.sleep(1)
+    if device is None:
+        raise SystemExit("device discovery failed after retries")
     log(f"device: {device.dev_id}")
     session = None
 

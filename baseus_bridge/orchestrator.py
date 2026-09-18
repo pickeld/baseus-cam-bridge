@@ -13,6 +13,7 @@ import re
 import shlex
 import stat
 import sys
+import time
 from pathlib import Path
 
 from .cloud import BaseusCloud
@@ -27,6 +28,17 @@ HLS_PORT = os.environ.get("BASEUS_HLS_PORT", "8888")
 WEBRTC_PORT = os.environ.get("BASEUS_WEBRTC_PORT", "8889")
 FRAMERATE = os.environ.get("BASEUS_FRAMERATE", "25")
 INCLUDE_OFFLINE = os.environ.get("BASEUS_INCLUDE_OFFLINE", "1") not in ("0", "false", "no")
+
+# Reliability / latency knobs.
+# How long MediaMTX waits for the bridge to publish its first frame before
+# killing it. Battery cameras can take a while to wake, so keep this generous.
+START_TIMEOUT = os.environ.get("BASEUS_START_TIMEOUT", "60")
+# How long to keep a stream running after the last viewer leaves. Higher =
+# faster re-opens (stream stays warm) at the cost of more battery/bandwidth.
+CLOSE_AFTER = os.environ.get("BASEUS_CLOSE_AFTER", "30")
+# Always-on: keep every camera streaming from startup (instant load, best for
+# mains-powered cameras). Off = on-demand (battery friendly).
+ALWAYS_ON = os.environ.get("BASEUS_ALWAYS_ON", "0") not in ("0", "false", "no")
 
 
 def log(*a):
@@ -63,6 +75,7 @@ def _run_on_demand_cmd(slug: str) -> str:
     bridge = f"{py} -m baseus_bridge.bridge --camera $MTX_PATH"
     ff = (
         "ffmpeg -hide_banner -loglevel warning -fflags +genpts "
+        "-analyzeduration 3M -probesize 3M "
         f"-f h264 -framerate {FRAMERATE} -i - -c:v copy "
         "-f rtsp -rtsp_transport tcp rtsp://localhost:$RTSP_PORT/$MTX_PATH"
     )
@@ -80,24 +93,49 @@ def _render_mediamtx_cfg(records: list[dict]) -> str:
         "srt: no",
         "hls: yes",
         "webrtc: yes",
+        # Give slow-waking cameras and RTSP readers more headroom.
+        "readTimeout: 20s",
+        "writeTimeout: 20s",
+        "writeQueueSize: 1024",
         "paths:",
     ]
     for rec in records:
         slug = rec["slug"]
         cmd = _run_on_demand_cmd(slug)
-        lines += [
-            f"  {slug}:",
-            f"    runOnDemand: {json.dumps(cmd)}",
-            "    runOnDemandRestart: yes",
-            "    runOnDemandStartTimeout: 20s",
-            "    runOnDemandCloseAfter: 15s",
-        ]
+        lines.append(f"  {slug}:")
+        if ALWAYS_ON:
+            # Keep the stream up from startup and restart it if it drops.
+            lines += [
+                f"    runOnInit: {json.dumps(cmd)}",
+                "    runOnInitRestart: yes",
+            ]
+        else:
+            lines += [
+                f"    runOnDemand: {json.dumps(cmd)}",
+                "    runOnDemandRestart: yes",
+                f"    runOnDemandStartTimeout: {START_TIMEOUT}s",
+                f"    runOnDemandCloseAfter: {CLOSE_AFTER}s",
+            ]
     lines.append("")
     return "\n".join(lines)
 
 
 def serve():
-    cams = discover()
+    # Retry initial discovery so a transient cloud/login hiccup doesn't take
+    # the whole add-on down (Supervisor would otherwise just restart-loop it).
+    cams = None
+    last_err = None
+    for attempt in range(1, 6):
+        try:
+            cams = discover()
+            break
+        except Exception as err:  # noqa: BLE001 - report and retry
+            last_err = err
+            wait = min(30, 5 * attempt)
+            log(f"[serve] discovery attempt {attempt}/5 failed: {err}; retrying in {wait}s")
+            time.sleep(wait)
+    if cams is None:
+        raise SystemExit(f"discovery failed after retries: {last_err}")
     if not INCLUDE_OFFLINE:
         cams = [c for c in cams if c.online]
     if not cams:

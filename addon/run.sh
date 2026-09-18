@@ -39,6 +39,12 @@ def main() -> None:
     os.environ["BASEUS_FRAMERATE"] = str(opts.get("framerate", 25))
     os.environ["BASEUS_INCLUDE_OFFLINE"] = "1" if opts.get("include_offline", True) else "0"
 
+    # Reliability / latency options.
+    os.environ["BASEUS_STREAM_TYPE"] = "1" if str(opts.get("stream_quality", "hd")).lower() == "sd" else "0"
+    os.environ["BASEUS_ALWAYS_ON"] = "1" if opts.get("always_on", False) else "0"
+    os.environ["BASEUS_START_TIMEOUT"] = str(opts.get("start_timeout", 60))
+    os.environ["BASEUS_CLOSE_AFTER"] = str(opts.get("close_after", 30))
+
     print(
         "Starting Baseus Cam Bridge (RTSP :8554, HLS :8888, WebRTC :8889)...",
         file=sys.stderr,
