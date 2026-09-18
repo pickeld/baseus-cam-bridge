@@ -95,6 +95,38 @@ If it prints a `confirmed_action` / `confirmed_shape`, pin them (env
 **Options**) to enable the switches/numbers. If it finds nothing, controls
 aren't cloud-settable with the tried conventions and would need deeper work.
 
+> On the current Baseus/XM cloud, every write returns `-9999 "interface not
+> currently supported"` — the cloud gateway is read-only. To control settings
+> you need the **local P2P set-commands**, which you can learn by observing your
+> own device (below).
+
+### Learn the local set-commands by observing your own device
+
+Settings are sent to the HomeStation over the local P2P command channel. You can
+read the exact command IDs + JSON the official app uses by capturing that
+traffic on **your own network** and decoding it with the same crypto the bridge
+already uses (no app binaries are touched):
+
+1. **Capture** the app↔HomeStation packets. Cleanest on UniFi: mirror the
+   HomeStation's switch port and capture with Wireshark, or on any host on the
+   path:
+   ```bash
+   sudo tcpdump -i <iface> -w baseus.pcap host <homestation-ip>
+   ```
+   Save as a classic `.pcap` (Wireshark: *Save As → Wireshark/tcpdump pcap*).
+2. **Toggle one setting** in the Baseus app while capturing (e.g. the status
+   light), then stop the capture.
+3. **Decode** it (secrets redacted):
+   ```bash
+   python -m baseus_bridge decode-capture baseus.pcap
+   ```
+   Each line is `{"dir": "app->dev", "cmd": <id>, "json": {...}}`. The line where
+   you toggled the setting reveals the **command ID** and **payload key** — e.g.
+   `cmd 306` with `{"light_status": 0}`. Those are exactly what a `set` needs.
+
+Send those command IDs/payloads and they can be wired into the bridge (with
+read-back + auto-revert safety) to make the Home Assistant switches work.
+
 ---
 
 ## Run without Docker

@@ -14,6 +14,9 @@ def main(argv=None):
     sub.add_parser("dump", help="print the full cloud device-list JSON (secrets redacted)")
     sub.add_parser("probe-controls",
                    help="safely discover the cloud set-action (toggles + reverts the status LED)")
+    dc = sub.add_parser("decode-capture",
+                        help="decode a pcap of the app<->device command channel (secrets redacted)")
+    dc.add_argument("pcap", help="path to a classic .pcap capture file")
     args = ap.parse_args(argv)
     cmd = args.cmd or "serve"
     try:
@@ -23,6 +26,9 @@ def main(argv=None):
             orchestrator.print_raw_devices()
         elif cmd == "probe-controls":
             orchestrator.probe_controls()
+        elif cmd == "decode-capture":
+            from . import capture
+            capture.decode_capture(args.pcap)
         else:
             orchestrator.serve()
     except KeyboardInterrupt:
