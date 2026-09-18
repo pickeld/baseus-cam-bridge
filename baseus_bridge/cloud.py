@@ -14,6 +14,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 import re
 import time
 import uuid
@@ -54,6 +55,37 @@ XM_HOST_FALLBACK = {
 
 class CloudError(RuntimeError):
     pass
+
+
+# --- writable-control (set) discovery ---------------------------------------
+# The cloud "set" operation for this binary-protocol device family is not
+# publicly documented, so the exact Action name + body shape are discovered
+# empirically (safely, with read-back + auto-revert) via ``probe-controls``.
+# These candidates are the most likely XM open-platform conventions. Once a
+# working pair is confirmed it can be pinned via env so controls "just work".
+SET_ACTION_CANDIDATES = (
+    "SetDeviceInfo",
+    "SetDeviceConfig",
+    "SetChildInfo",
+    "OperateDevice",
+    "DeviceControl",
+    "SetDeviceParam",
+    "SetDeviceParams",
+    "SetIpcParam",
+    "UpdateDeviceInfo",
+    "SetDeviceProperty",
+)
+SET_SHAPE_CANDIDATES = (
+    "flat_device_sn",   # {"device_sn": sn, <key>: value}
+    "flat_sn",          # {"sn": sn, <key>: value}
+    "params",           # {"device_sn": sn, "params": {<key>: value}}
+    "device_info",      # {"device_sn": sn, "device_info": {<key>: value}}
+    "key_value",        # {"device_sn": sn, "key": <key>, "value": value}
+    "child",            # {"device_sn": base, "channel": ch, "child_sn": sn, <key>: value}
+)
+# Pin the confirmed pair here (or via env) after running the probe.
+CONFIRMED_SET_ACTION = os.environ.get("BASEUS_SET_ACTION") or ""
+CONFIRMED_SET_SHAPE = os.environ.get("BASEUS_SET_SHAPE") or ""
 
 
 def _md5hex(b: bytes) -> str:
@@ -205,6 +237,62 @@ class BaseusCloud:
         r = self._session.post(self._host, headers=self._xm_headers("GetUserDeviceList"),
                                data=b"{}", timeout=self.timeout)
         return r.json()
+
+    # --- writable controls ---
+    def _xm_post(self, action: str, body_obj: dict) -> dict:
+        """Signed XM request for an arbitrary Action (same envelope as reads)."""
+        if not self.token:
+            self.login()
+        if not self._host:
+            self._host = self._resolve_host()
+        data = json.dumps(body_obj, separators=(",", ":")).encode()
+        r = self._session.post(self._host, headers=self._xm_headers(action),
+                               data=data, timeout=self.timeout)
+        try:
+            return r.json()
+        except ValueError:
+            return {"result": False, "code": -1,
+                    "_http": r.status_code, "_text": (r.text or "")[:200]}
+
+    @staticmethod
+    def _set_body(shape: str, device_sn: str, key: str, value,
+                  channel: Optional[int] = None, child_sn: Optional[str] = None) -> dict:
+        if shape == "flat_device_sn":
+            return {"device_sn": device_sn, key: value}
+        if shape == "flat_sn":
+            return {"sn": device_sn, key: value}
+        if shape == "params":
+            return {"device_sn": device_sn, "params": {key: value}}
+        if shape == "device_info":
+            return {"device_sn": device_sn, "device_info": {key: value}}
+        if shape == "key_value":
+            return {"device_sn": device_sn, "key": key, "value": value}
+        if shape == "child":
+            return {"device_sn": device_sn, "channel": int(channel or 0),
+                    "child_sn": child_sn or device_sn, key: value}
+        raise CloudError(f"unknown set-body shape {shape!r}")
+
+    def set_device_param(self, device_sn: str, key: str, value, *,
+                         action: Optional[str] = None, shape: Optional[str] = None,
+                         channel: Optional[int] = None,
+                         child_sn: Optional[str] = None) -> tuple[bool, dict]:
+        """Attempt to set a device/camera parameter via the cloud.
+
+        ``action``/``shape`` default to the confirmed pair (pinned constant or
+        env). Returns ``(accepted, raw_response)`` where ``accepted`` only means
+        the API reported success -- callers should verify by re-reading state.
+        """
+        action = action or CONFIRMED_SET_ACTION
+        shape = shape or CONFIRMED_SET_SHAPE
+        if not action or not shape:
+            raise CloudError(
+                "no confirmed set action/shape; run `python -m baseus_bridge "
+                "probe-controls` first, then pin BASEUS_SET_ACTION/BASEUS_SET_SHAPE"
+            )
+        body = self._set_body(shape, device_sn, key, value, channel, child_sn)
+        resp = self._xm_post(action, body)
+        accepted = bool(resp.get("result")) and int(resp.get("code", 0) or 0) == 0
+        return accepted, resp
 
     # --- high-level discovery ---
     def discover_cameras(self) -> list[Camera]:

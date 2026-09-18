@@ -77,6 +77,24 @@ with all secrets redacted):
 docker compose run --rm baseus-cam-bridge python -m baseus_bridge dump
 ```
 
+### Discover writable controls (safe)
+
+Changing settings (status light, night vision, volumes, etc.) needs the cloud
+"set" operation, whose exact Action + payload shape are not publicly documented
+for this device family. The `probe-controls` command discovers them **safely**:
+it toggles the benign HomeStation status LED, verifies the change by re-reading
+the device list, then reverts it. A wrong Action simply errors, so nothing is
+left changed.
+
+```bash
+docker compose run --rm baseus-cam-bridge python -m baseus_bridge probe-controls
+```
+
+If it prints a `confirmed_action` / `confirmed_shape`, pin them (env
+`BASEUS_SET_ACTION` / `BASEUS_SET_SHAPE`, or the Home Assistant integration's
+**Options**) to enable the switches/numbers. If it finds nothing, controls
+aren't cloud-settable with the tried conventions and would need deeper work.
+
 ---
 
 ## Run without Docker

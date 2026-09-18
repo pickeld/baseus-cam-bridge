@@ -197,3 +197,80 @@ def print_raw_devices():
     cloud.login()
     resp = cloud.raw_device_list()
     print(json.dumps(_redact(resp), indent=2, ensure_ascii=False))
+
+
+def _first_base_led(resp: dict):
+    """Return (device_sn, led_status) for the first device that reports an LED."""
+    for dev in ((resp.get("payload") or {}).get("device_list")) or []:
+        info = dev.get("device_info") or {}
+        if info.get("led_status") is not None:
+            return dev.get("device_sn"), info.get("led_status")
+    return None, None
+
+
+def probe_controls():
+    """Safely discover the cloud 'set' Action + body shape for this account.
+
+    Strategy (non-destructive): toggle the benign HomeStation **status LED**,
+    verify the change by re-reading the device list, then revert. A wrong
+    Action/shape simply errors or does nothing, so no setting is left changed.
+    Prints the confirmed pair (no secrets) to pin via BASEUS_SET_ACTION/SHAPE.
+    """
+    from .cloud import SET_ACTION_CANDIDATES, SET_SHAPE_CANDIDATES
+
+    cloud = _cloud_from_env()
+    cloud.login()
+    device_sn, current = _first_base_led(cloud.raw_device_list())
+    if device_sn is None:
+        raise SystemExit("no device with a 'led_status' field to probe safely")
+    target = 0 if current else 1
+    log(f"[probe] using status LED on base device; current={current}, will try -> {target}")
+
+    def read_led():
+        for _ in range(3):
+            time.sleep(2)
+            _sn, val = _first_base_led(cloud.raw_device_list())
+            if val is not None:
+                return val
+        return None
+
+    winner = None
+    attempts = 0
+    for action in SET_ACTION_CANDIDATES:
+        for shape in SET_SHAPE_CANDIDATES:
+            attempts += 1
+            try:
+                accepted, resp = cloud.set_device_param(
+                    device_sn, "led_status", target, action=action, shape=shape)
+            except Exception as err:  # noqa: BLE001
+                log(f"[probe] {action}/{shape}: error {err}")
+                continue
+            code = resp.get("code")
+            if not accepted:
+                log(f"[probe] {action}/{shape}: rejected (code={code})")
+                continue
+            log(f"[probe] {action}/{shape}: ACCEPTED (code={code}); verifying...")
+            if read_led() == target:
+                winner = (action, shape)
+                log(f"[probe] VERIFIED with {action}/{shape}; reverting LED to {current}")
+                try:
+                    cloud.set_device_param(device_sn, "led_status", current,
+                                           action=action, shape=shape)
+                except Exception:  # noqa: BLE001
+                    log("[probe] WARNING: revert failed; set the status LED back in the app")
+                break
+            log(f"[probe] {action}/{shape}: accepted but state did not change; skipping")
+        if winner:
+            break
+
+    print(json.dumps({
+        "probed_attempts": attempts,
+        "confirmed_action": winner[0] if winner else None,
+        "confirmed_shape": winner[1] if winner else None,
+        "hint": (
+            f"export BASEUS_SET_ACTION={winner[0]} BASEUS_SET_SHAPE={winner[1]}"
+            if winner else
+            "no working set-action found; device controls are not cloud-settable "
+            "with the tried conventions (would require deeper protocol work)"
+        ),
+    }, indent=2))
