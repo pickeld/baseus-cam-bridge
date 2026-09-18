@@ -356,8 +356,16 @@ def probe_controls():
             "differs, set it too for the HomeStation LED."
         )
     else:
-        out["hint"] = (
-            "no working set-action found with the tried conventions; per-device "
-            "controls likely require deeper protocol work"
-        )
+        codes = {d.get("code") for d in out["diagnostics"]}
+        if codes == {-9999}:
+            out["hint"] = (
+                "the cloud rejected every write with -9999 'interface not "
+                "currently supported' -> this cloud gateway is read-only; "
+                "settings would need local P2P set-commands (not implemented)"
+            )
+        else:
+            out["hint"] = (
+                "no working set-action found with the tried conventions; per-device "
+                "controls likely require deeper protocol work (see diagnostics)"
+            )
     print(json.dumps(out, indent=2))
