@@ -199,78 +199,135 @@ def print_raw_devices():
     print(json.dumps(_redact(resp), indent=2, ensure_ascii=False))
 
 
+def _iter_devices(resp: dict):
+    return ((resp.get("payload") or {}).get("device_list")) or []
+
+
 def _first_base_led(resp: dict):
     """Return (device_sn, led_status) for the first device that reports an LED."""
-    for dev in ((resp.get("payload") or {}).get("device_list")) or []:
+    for dev in _iter_devices(resp):
         info = dev.get("device_info") or {}
         if info.get("led_status") is not None:
             return dev.get("device_sn"), info.get("led_status")
     return None, None
 
 
-def probe_controls():
-    """Safely discover the cloud 'set' Action + body shape for this account.
+def _first_child_probe(resp: dict, key: str):
+    """Return (base_sn, channel, child_sn, value) for the first child with ``key``."""
+    for dev in _iter_devices(resp):
+        info = dev.get("device_info") or {}
+        chans = {c.get("sn"): c.get("channel") for c in (info.get("CameraChannel") or [])}
+        for child in (dev.get("child_list") or []):
+            ci = child.get("child_info") or {}
+            if ci.get(key) is not None:
+                csn = child.get("child_sn")
+                return dev.get("device_sn"), int(chans.get(csn, 0) or 0), csn, ci.get(key)
+    return None, None, None, None
 
-    Strategy (non-destructive): toggle the benign HomeStation **status LED**,
-    verify the change by re-reading the device list, then revert. A wrong
-    Action/shape simply errors or does nothing, so no setting is left changed.
-    Prints the confirmed pair (no secrets) to pin via BASEUS_SET_ACTION/SHAPE.
+
+def _read_child_val(resp: dict, child_sn: str, key: str):
+    for dev in _iter_devices(resp):
+        for child in (dev.get("child_list") or []):
+            if child.get("child_sn") == child_sn:
+                return (child.get("child_info") or {}).get(key)
+    return None
+
+
+def _probe_pair(cloud, label, key, current, set_kwargs, read_val):
+    """Try every action/shape to flip ``key``, verify, then revert.
+
+    ``set_kwargs(action, shape, value)`` -> dict for ``set_device_param``.
+    ``read_val()`` -> freshly re-read current value (or None).
+    Returns (action, shape) that verifiably changed the value, else None.
     """
     from .cloud import SET_ACTION_CANDIDATES, SET_SHAPE_CANDIDATES
 
-    cloud = _cloud_from_env()
-    cloud.login()
-    device_sn, current = _first_base_led(cloud.raw_device_list())
-    if device_sn is None:
-        raise SystemExit("no device with a 'led_status' field to probe safely")
     target = 0 if current else 1
-    log(f"[probe] using status LED on base device; current={current}, will try -> {target}")
-
-    def read_led():
-        for _ in range(3):
-            time.sleep(2)
-            _sn, val = _first_base_led(cloud.raw_device_list())
-            if val is not None:
-                return val
-        return None
-
-    winner = None
-    attempts = 0
+    log(f"[probe] {label}: current={current}, trying -> {target}")
     for action in SET_ACTION_CANDIDATES:
         for shape in SET_SHAPE_CANDIDATES:
-            attempts += 1
             try:
-                accepted, resp = cloud.set_device_param(
-                    device_sn, "led_status", target, action=action, shape=shape)
+                accepted, resp = cloud.set_device_param(**set_kwargs(action, shape, target))
             except Exception as err:  # noqa: BLE001
-                log(f"[probe] {action}/{shape}: error {err}")
+                log(f"[probe] {label} {action}/{shape}: error {err}")
                 continue
-            code = resp.get("code")
             if not accepted:
-                log(f"[probe] {action}/{shape}: rejected (code={code})")
                 continue
-            log(f"[probe] {action}/{shape}: ACCEPTED (code={code}); verifying...")
-            if read_led() == target:
-                winner = (action, shape)
-                log(f"[probe] VERIFIED with {action}/{shape}; reverting LED to {current}")
+            log(f"[probe] {label} {action}/{shape}: ACCEPTED (code={resp.get('code')}); verifying...")
+            val = None
+            for _ in range(3):
+                time.sleep(2)
+                val = read_val()
+                if val is not None:
+                    break
+            if val == target:
+                log(f"[probe] {label} VERIFIED with {action}/{shape}; reverting to {current}")
                 try:
-                    cloud.set_device_param(device_sn, "led_status", current,
-                                           action=action, shape=shape)
+                    cloud.set_device_param(**set_kwargs(action, shape, current))
                 except Exception:  # noqa: BLE001
-                    log("[probe] WARNING: revert failed; set the status LED back in the app")
-                break
-            log(f"[probe] {action}/{shape}: accepted but state did not change; skipping")
-        if winner:
-            break
+                    log(f"[probe] WARNING: {label} revert failed; restore it in the app")
+                return action, shape
+            log(f"[probe] {label} {action}/{shape}: accepted but no change; skipping")
+    return None
 
-    print(json.dumps({
-        "probed_attempts": attempts,
-        "confirmed_action": winner[0] if winner else None,
-        "confirmed_shape": winner[1] if winner else None,
-        "hint": (
-            f"export BASEUS_SET_ACTION={winner[0]} BASEUS_SET_SHAPE={winner[1]}"
-            if winner else
-            "no working set-action found; device controls are not cloud-settable "
-            "with the tried conventions (would require deeper protocol work)"
-        ),
-    }, indent=2))
+
+def probe_controls():
+    """Safely discover the cloud 'set' Action + body shape for this account.
+
+    Non-destructive: probes the benign HomeStation **status LED** (base level)
+    and the cosmetic **OSD logo** overlay (child/per-camera level), verifying
+    each change by re-reading the device list and then reverting it. Wrong
+    action/shape combos simply error or no-op, so nothing is left changed.
+    Prints the confirmed pairs to pin in Home Assistant (or via env).
+    """
+    cloud = _cloud_from_env()
+    cloud.login()
+
+    # --- base level: status LED ---
+    base_sn, led = _first_base_led(cloud.raw_device_list())
+    base_winner = None
+    if base_sn is None:
+        log("[probe] no base 'led_status' to probe; skipping base level")
+    else:
+        base_winner = _probe_pair(
+            cloud, "base/led_status", "led_status", led,
+            set_kwargs=lambda a, s, v: dict(device_sn=base_sn, key="led_status",
+                                            value=v, action=a, shape=s),
+            read_val=lambda: _first_base_led(cloud.raw_device_list())[1],
+        )
+
+    # --- child level: OSD logo overlay (cosmetic, fully reversible) ---
+    b_sn, ch, child_sn, osd = _first_child_probe(cloud.raw_device_list(), "osd_logo")
+    child_winner = None
+    if child_sn is None:
+        log("[probe] no child 'osd_logo' to probe; skipping child level")
+    else:
+        child_winner = _probe_pair(
+            cloud, "child/osd_logo", "osd_logo", osd,
+            set_kwargs=lambda a, s, v: dict(device_sn=b_sn, key="osd_logo", value=v,
+                                            action=a, shape=s, channel=ch, child_sn=child_sn),
+            read_val=lambda: _read_child_val(cloud.raw_device_list(), child_sn, "osd_logo"),
+        )
+
+    out = {
+        "base": {
+            "confirmed_action": base_winner[0] if base_winner else None,
+            "confirmed_shape": base_winner[1] if base_winner else None,
+        },
+        "child": {
+            "confirmed_action": child_winner[0] if child_winner else None,
+            "confirmed_shape": child_winner[1] if child_winner else None,
+        },
+    }
+    if child_winner or base_winner:
+        out["hint"] = (
+            "In HA -> Baseus Security -> Configure: enable controls and paste the "
+            "CHILD action/shape (covers the per-camera switches). If the base pair "
+            "differs, set it too for the HomeStation LED."
+        )
+    else:
+        out["hint"] = (
+            "no working set-action found with the tried conventions; per-device "
+            "controls likely require deeper protocol work"
+        )
+    print(json.dumps(out, indent=2))
