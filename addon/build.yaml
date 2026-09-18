@@ -9,4 +9,4 @@ args:
   MEDIAMTX_VERSION: "1.11.3"
   # Pin to an exact commit so each release busts Docker's layer cache and
   # always installs the intended bridge code (bump this with the version).
-  BASEUS_REF: "82d87a7bd7f168fb8b4733399e68c111ac9e7115"
+  BASEUS_REF: "2727e43d27fb9ea4eeb0669e431bdb832ed616f4"
