@@ -159,10 +159,13 @@ def print_discovery():
 _SENSITIVE_KEY = re.compile(
     r"(pass|pwd|token|auth|secret|p2p|(?<![a-z])key(?![a-z])|licen|access|"
     r"refresh|session|cookie|sign(?!al)|ticket|account|email|phone|mobile|"
+    r"user_?id|userid|(?<![a-z])uid(?![a-z])|nickname|share_name|"
     r"(?<![a-z])did(?![a-z])|(?<![a-z])sn(?![a-z])|serial|(?<![a-z])mac|"
     r"(?<![a-z])ip(?![a-z])|(?<![a-z])lan|(?<![a-z])wan|ssid)",
     re.I,
 )
+# Value-level catch-all: anything that looks like an email address.
+_EMAIL_VALUE = re.compile(r"[^\s@]+@[^\s@]+\.[^\s@]+")
 
 
 def _redact(obj):
@@ -173,6 +176,8 @@ def _redact(obj):
             if isinstance(v, (dict, list)):
                 out[k] = _redact(v)
             elif _SENSITIVE_KEY.search(str(k)):
+                out[k] = "***"
+            elif isinstance(v, str) and _EMAIL_VALUE.fullmatch(v.strip()):
                 out[k] = "***"
             else:
                 out[k] = v

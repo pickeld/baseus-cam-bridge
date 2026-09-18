@@ -129,14 +129,27 @@ class BaseusCloud:
         }
         r = self._session.post(url, params={"countryCode": self.country_code},
                                data=body, headers=headers, timeout=self.timeout)
-        data = r.json()
+        try:
+            data = r.json()
+        except ValueError:
+            snippet = (r.text or "").strip().replace("\n", " ")[:200]
+            raise CloudError(
+                f"login endpoint returned non-JSON (HTTP {r.status_code}) "
+                f"from {region}: {snippet!r} -- check the account is a real "
+                "Baseus login (not the placeholder) and the region."
+            )
         return (data.get("data") or {}).get("auth"), data
 
     def login(self) -> str:
         regions = [self.region] if self.region in AUTH_HOSTS else list(AUTH_HOSTS)
         last = None
+        last_err = None
         for reg in regions:
-            token, data = self._login_once(reg)
+            try:
+                token, data = self._login_once(reg)
+            except CloudError as err:
+                last_err = err
+                continue
             if token:
                 self.token = token
                 self.resolved_region = reg
@@ -145,6 +158,8 @@ class BaseusCloud:
             msg = data.get("message") or data.get("msg")
             if data.get("code") in (100209,) or (msg and "password" in str(msg).lower()):
                 break
+        if last is None and last_err is not None:
+            raise last_err
         msg = (last or {}).get("message") or (last or {}).get("msg") or "unknown error"
         raise CloudError(f"login failed: {msg} (check account/password/region)")
 
@@ -217,19 +232,38 @@ class BaseusCloud:
             channels = info.get("CameraChannel") or []
             children = {c.get("child_sn"): c for c in (dev.get("child_list") or [])}
 
+            # Base-level telemetry shared by all paired cameras (storage, LED,
+            # Wi-Fi SSID). Attached only to the first channel so we don't spawn
+            # duplicate SD-card sensors for every camera on the same base.
+            base_extra = {
+                "storage": info.get("Storage", {}),
+                "led_status": info.get("led_status"),
+                "cur_ssid": info.get("cur_ssid"),
+                "prompt_vol": info.get("prompt_vol"),
+                "connection_mode": info.get("ConnectionMode"),
+                "device_model": dev.get("device_model"),
+                "device_name": dev.get("device_name"),
+            }
+
             if channels:  # HomeStation with paired cameras
                 for ch in channels:
                     cam_sn = ch.get("sn") or ""
                     child = children.get(cam_sn, {})
                     name = child.get("child_name") or f"{dev.get('device_name','cam')}-{ch.get('channel')}"
                     online = bool(child.get("child_online_status", 1))
+                    extra = {
+                        "child_info": child.get("child_info", {}),
+                        "child_extend": child.get("child_extend", {}),
+                    }
+                    if int(ch.get("channel", 0)) == 0:
+                        extra["base"] = base_extra
                     cams.append(Camera(
                         name=name, slug=uniq(slugify(name, cam_sn or "cam")),
                         host=host, device_sn=device_sn, p2p_password=p2p_password,
                         channel=int(ch.get("channel", 0)), camera_sn=cam_sn,
                         device_did=device_did, model=ch.get("model") or "",
                         online=online, is_homebase_child=True,
-                        extra={"child_info": child.get("child_info", {})},
+                        extra=extra,
                     ))
             else:  # standalone camera == the device itself
                 name = dev.get("device_name") or device_sn
