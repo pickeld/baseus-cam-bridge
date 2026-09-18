@@ -67,13 +67,21 @@ SET_ACTION_CANDIDATES = (
     "SetDeviceInfo",
     "SetDeviceConfig",
     "SetChildInfo",
+    "SetChildDeviceInfo",
     "OperateDevice",
+    "OperateChildDevice",
     "DeviceControl",
+    "ControlDevice",
     "SetDeviceParam",
     "SetDeviceParams",
+    "SetDeviceParamInfo",
+    "SetDeviceProperty",
+    "SetDeviceProperties",
     "SetIpcParam",
     "UpdateDeviceInfo",
-    "SetDeviceProperty",
+    "SendCommand",
+    "P2pCommand",
+    "DeviceCmd",
 )
 SET_SHAPE_CANDIDATES = (
     "flat_device_sn",   # {"device_sn": sn, <key>: value}

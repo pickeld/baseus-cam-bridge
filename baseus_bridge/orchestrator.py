@@ -233,11 +233,12 @@ def _read_child_val(resp: dict, child_sn: str, key: str):
     return None
 
 
-def _probe_pair(cloud, label, key, current, set_kwargs, read_val):
+def _probe_pair(cloud, label, key, current, set_kwargs, read_val, samples):
     """Try every action/shape to flip ``key``, verify, then revert.
 
     ``set_kwargs(action, shape, value)`` -> dict for ``set_device_param``.
     ``read_val()`` -> freshly re-read current value (or None).
+    Appends per-attempt outcomes to ``samples`` for diagnostics.
     Returns (action, shape) that verifiably changed the value, else None.
     """
     from .cloud import SET_ACTION_CANDIDATES, SET_SHAPE_CANDIDATES
@@ -249,8 +250,16 @@ def _probe_pair(cloud, label, key, current, set_kwargs, read_val):
             try:
                 accepted, resp = cloud.set_device_param(**set_kwargs(action, shape, target))
             except Exception as err:  # noqa: BLE001
-                log(f"[probe] {label} {action}/{shape}: error {err}")
+                samples.append({"level": label, "action": action, "shape": shape,
+                                "error": str(err)[:120]})
                 continue
+            samples.append({
+                "level": label, "action": action, "shape": shape,
+                "accepted": accepted, "code": resp.get("code"),
+                "msg": (resp.get("msg") or resp.get("message")
+                        or resp.get("_text") or "")[:120],
+                "http": resp.get("_http"),
+            })
             if not accepted:
                 continue
             log(f"[probe] {label} {action}/{shape}: ACCEPTED (code={resp.get('code')}); verifying...")
@@ -271,6 +280,23 @@ def _probe_pair(cloud, label, key, current, set_kwargs, read_val):
     return None
 
 
+def _summarize_samples(samples):
+    """Dedupe probe responses by (accepted, http, code, msg/error) for readability."""
+    buckets: dict = {}
+    for s in samples:
+        keyt = (s.get("accepted"), s.get("http"), s.get("code"),
+                s.get("msg", s.get("error", "")))
+        b = buckets.setdefault(keyt, {"count": 0, "examples": []})
+        b["count"] += 1
+        if len(b["examples"]) < 3:
+            b["examples"].append(f"{s['action']}/{s['shape']}")
+    out = []
+    for (accepted, http, code, msg), b in buckets.items():
+        out.append({"accepted": accepted, "http": http, "code": code,
+                    "msg": msg, "count": b["count"], "examples": b["examples"]})
+    return sorted(out, key=lambda d: -d["count"])
+
+
 def probe_controls():
     """Safely discover the cloud 'set' Action + body shape for this account.
 
@@ -282,6 +308,7 @@ def probe_controls():
     """
     cloud = _cloud_from_env()
     cloud.login()
+    samples: list = []
 
     # --- base level: status LED ---
     base_sn, led = _first_base_led(cloud.raw_device_list())
@@ -294,6 +321,7 @@ def probe_controls():
             set_kwargs=lambda a, s, v: dict(device_sn=base_sn, key="led_status",
                                             value=v, action=a, shape=s),
             read_val=lambda: _first_base_led(cloud.raw_device_list())[1],
+            samples=samples,
         )
 
     # --- child level: OSD logo overlay (cosmetic, fully reversible) ---
@@ -307,9 +335,11 @@ def probe_controls():
             set_kwargs=lambda a, s, v: dict(device_sn=b_sn, key="osd_logo", value=v,
                                             action=a, shape=s, channel=ch, child_sn=child_sn),
             read_val=lambda: _read_child_val(cloud.raw_device_list(), child_sn, "osd_logo"),
+            samples=samples,
         )
 
     out = {
+        "diagnostics": _summarize_samples(samples),
         "base": {
             "confirmed_action": base_winner[0] if base_winner else None,
             "confirmed_shape": base_winner[1] if base_winner else None,
