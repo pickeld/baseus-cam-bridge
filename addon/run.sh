@@ -44,6 +44,7 @@ def main() -> None:
     os.environ["BASEUS_ALWAYS_ON"] = "1" if opts.get("always_on", False) else "0"
     os.environ["BASEUS_START_TIMEOUT"] = str(opts.get("start_timeout", 60))
     os.environ["BASEUS_CLOSE_AFTER"] = str(opts.get("close_after", 30))
+    os.environ["BASEUS_HEARTBEAT_SEC"] = str(opts.get("heartbeat", 3))
 
     print(
         "Starting Baseus Cam Bridge (RTSP :8554, HLS :8888, WebRTC :8889)...",

@@ -32,6 +32,7 @@ options:
   always_on: false
   start_timeout: 60
   close_after: 30
+  heartbeat: 3
 schema:
   account: str
   password: password
@@ -43,3 +44,4 @@ schema:
   always_on: bool
   start_timeout: int(10,180)
   close_after: int(0,600)
+  heartbeat: int(0,30)

@@ -38,6 +38,7 @@ CMD_CLOSEVIDEO = 3
 CMD_DEVINFO = 100
 CMD_GET_CAMERA_LIST = 376
 CMD_HOMEBASE_LIVE_ENABLE = 390
+CMD_HEARTBEAT = 2001
 
 
 def md5hex(s: str) -> str:
@@ -73,6 +74,18 @@ def build_command(cmd: int, payload: bytes) -> bytes:
     return bytes(h) + payload
 
 
+def build_heartbeat() -> bytes:
+    """Empty XM heartbeat: cmd 2001, frame model 0xE0, no payload.
+
+    The official app sends this every ~3 s on the command channel while live
+    view is open. Without it the HomeStation ends the live session after
+    about 120 s.
+    """
+    h = bytearray(build_command(CMD_HEARTBEAT, b""))
+    h[5] = 0xE0
+    return bytes(h)
+
+
 def command_json(cmd: int, obj: dict) -> bytes:
     return build_command(cmd, json.dumps(obj, separators=(",", ":")).encode())
 
@@ -89,6 +102,45 @@ def parse_command_response(raw: bytes):
     ln = struct.unpack_from("<H", raw, 12)[0]
     cmd = struct.unpack_from("<H", raw, 14)[0]
     return cmd, entype, raw[24:24 + ln]
+
+
+class DrwReorder:
+    """Restore PPPP DRW order on one channel.
+
+    The device sends the A/V byte stream split into DRW packets with a 16-bit
+    index over UDP. Packets arrive twice (retransmits) or out of order, and
+    feeding them to the parser in arrival order corrupts frames. This delivers
+    payloads strictly in index order, drops duplicates, and skips a missing
+    packet only once ``window`` newer packets are waiting (it is then lost).
+    """
+
+    def __init__(self, window: int = 64):
+        self.window = window
+        self.next = None
+        self.pending: dict[int, bytes] = {}
+        self.dups = 0
+        self.gaps = 0
+
+    def feed(self, idx: int, payload: bytes) -> list[bytes]:
+        if self.next is None:
+            self.next = idx
+        if ((idx - self.next) & 0xFFFF) >= 0x8000 or idx in self.pending:
+            self.dups += 1  # already delivered or already waiting
+            return []
+        self.pending[idx] = payload
+        out = self._drain()
+        if len(self.pending) > self.window:
+            self.gaps += 1
+            self.next = min(self.pending, key=lambda i: (i - self.next) & 0xFFFF)
+            out += self._drain()
+        return out
+
+    def _drain(self) -> list[bytes]:
+        out = []
+        while self.next in self.pending:
+            out.append(self.pending.pop(self.next))
+            self.next = (self.next + 1) & 0xFFFF
+        return out
 
 
 class VideoReassembler:

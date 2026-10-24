@@ -32,6 +32,8 @@ KEEPALIVE_SEC = 20
 CAMERAS_FILE = os.environ.get("BASEUS_CAMERAS_FILE", "/run/baseus/cameras.json")
 # 0 = main/HD stream, 1 = sub/SD stream. SD is lighter and often loads faster.
 STREAM_TYPE = int(os.environ.get("BASEUS_STREAM_TYPE", "0"))
+# XM heartbeat interval in seconds (0 = off). Keeps the live session open.
+HEARTBEAT_SEC = float(os.environ.get("BASEUS_HEARTBEAT_SEC", "3"))
 
 
 def log(*a):
@@ -44,6 +46,7 @@ class CameraBridge(BinarySession):
         self.cam = cam
         self.key = P.aes_key(cam["p2p_password"])
         self.reasm = P.VideoReassembler(self.key)
+        self.reorder = P.DrwReorder()
         self.login_ok = False
         self.logged_in = asyncio.Event()
         self.out = sys.stdout.buffer
@@ -76,8 +79,9 @@ class CameraBridge(BinarySession):
         await self.send(make_drw_ack_pkt(pkt))
         if pkt._channel == Channel.Video:
             try:
-                for frame in self.reasm.feed(raw):
-                    self.out.write(frame)
+                for chunk in self.reorder.feed(pkt._cmd_idx, raw):
+                    for frame in self.reasm.feed(chunk):
+                        self.out.write(frame)
                 self.out.flush()
             except (BrokenPipeError, ValueError):
                 self.dead.set()
@@ -124,6 +128,16 @@ class CameraBridge(BinarySession):
                              {"channel": ch, "camera_sn": sn,
                               "streamType": STREAM_TYPE, "videoKeepAlive_2": 0})
 
+    async def _heartbeat_loop(self):
+        while not self.dead.is_set():
+            await asyncio.sleep(HEARTBEAT_SEC)
+            try:
+                idx = self.outgoing_command_idx
+                self.outgoing_command_idx += 1
+                await self.send(DrwPkt(Channel.Command.value, idx, P.build_heartbeat()))
+            except Exception as e:  # noqa: BLE001 - never kill the stream for this
+                log(f">>> heartbeat send failed: {e}")
+
     async def _do_login(self) -> bool:
         await asyncio.sleep(0.5)
         user = self.cam["device_sn"]
@@ -155,13 +169,16 @@ class CameraBridge(BinarySession):
             return
         log(">>> login ok; opening video")
         await self._open_video()
+        if HEARTBEAT_SEC > 0:
+            asyncio.create_task(self._heartbeat_loop())
         last = self.reasm.emitted
         stalls = 0
         while not self.dead.is_set():
             await asyncio.sleep(KEEPALIVE_SEC)
             if self.reasm.emitted == last:
                 stalls += 1
-                log(f">>> stall #{stalls}; re-opening")
+                log(f">>> stall #{stalls}; re-opening "
+                    f"(dups={self.reorder.dups}, gaps={self.reorder.gaps})")
                 await self._open_video()
                 if stalls >= 3:
                     log(">>> persistent stall; exiting"); self.dead.set()
