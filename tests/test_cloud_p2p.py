@@ -125,7 +125,7 @@ def test_stream_opens_video_and_emits_annexb_frames():
         raise BrokenPipeError
 
     assert cloud_p2p.stream(session, CAM, sink) == "sink_closed"
-    assert got == [sps]
+    assert [f.data for f in got] == [sps]
     cmds = [c for c, _ in session.sent_commands(key)]
     assert cmds[:2] == [P.CMD_LOGIN, P.CMD_OPENVIDEO]
 
@@ -285,7 +285,8 @@ def test_auto_tries_lan_once_then_cloud(monkeypatch):
 
     monkeypatch.setattr(bridge, "TRANSPORT", "auto")
     monkeypatch.setattr(bridge, "_find_on_lan", fake_find)
-    monkeypatch.setattr(cloud_p2p, "run", lambda cam: calls.append(("cloud",)) or "sink_closed")
+    monkeypatch.setattr(cloud_p2p, "run",
+                        lambda cam, *a, **k: calls.append(("cloud",)) or "sink_closed")
     asyncio.run(bridge._main(dict(CAM)))
     assert calls == [("lan", 1), ("cloud",)]
 
@@ -300,7 +301,7 @@ def test_lan_mode_keeps_original_retries_and_never_uses_cloud(monkeypatch):
 
     monkeypatch.setattr(bridge, "TRANSPORT", "lan")
     monkeypatch.setattr(bridge, "_find_on_lan", fake_find)
-    monkeypatch.setattr(cloud_p2p, "run", lambda cam: pytest.fail("cloud used"))
+    monkeypatch.setattr(cloud_p2p, "run", lambda cam, *a, **k: pytest.fail("cloud used"))
     with pytest.raises(SystemExit, match="discovery failed"):
         asyncio.run(bridge._main(dict(CAM)))
     assert calls == [3]
@@ -315,7 +316,7 @@ def test_cloud_mode_skips_lan(monkeypatch):
 
     monkeypatch.setattr(bridge, "_find_on_lan", no_lan)
 
-    def boom(cam):
+    def boom(cam, *a, **k):
         raise PpcsError("PPCS: direct peer not established")
 
     monkeypatch.setattr(cloud_p2p, "run", boom)
@@ -403,3 +404,46 @@ def test_xm_login_over_real_udp_session():
     session = UdpSession(sock, peer, b"", did=CAM["device_did"], clock=Clock())
     assert cloud_p2p.xm_login(session, CAM, clock=session._clock) is True
     assert session.pending(0) == 0
+
+
+# --- dual-lens on the cloud transport ---------------------------------------
+def test_cloud_stream_feeds_hub_both_lenses_and_stops_when_idle():
+    """Right-lens frames (command bit 0x4000) reach the hub sink as VideoFrames."""
+    from baseus_bridge.demux import LEFT, RIGHT, LensDemux
+    key = P.aes_key(P2P_PW)
+    vps = b"\x00\x00\x00\x01\x40\x01" + b"\x0c" * 10     # HEVC VPS starts output
+    left = P.build_av_packet(vps, fn=1, command=0x8000)
+    right = P.build_av_packet(vps, fn=1, command=0x8000 | 0x4000)
+    session = FakeSession([
+        (0, reply_frame(P.CMD_LOGIN, {"result": "ok"}, key)),
+        (1, left + right),
+    ])
+    demux = LensDemux()
+    lenses = []
+
+    def sink(frame):
+        lenses.append(demux.push(frame))
+
+    stop = {"n": 0}
+
+    def idle():
+        stop["n"] += 1
+        return len(lenses) >= 2
+
+    assert cloud_p2p.stream(session, CAM, sink, should_stop=idle) == "stopped"
+    assert lenses == [LEFT, RIGHT]
+
+
+def test_hub_main_passes_on_frame_and_idle_check_to_cloud(monkeypatch):
+    import asyncio
+    seen = {}
+
+    def fake_run(cam, sink=None, *, should_stop=None):
+        seen["sink"], seen["stop"] = sink, should_stop
+        return "stopped"
+
+    monkeypatch.setattr(bridge, "TRANSPORT", "cloud")
+    monkeypatch.setattr(cloud_p2p, "run", fake_run)
+    marker_sink, marker_stop = object(), object()
+    asyncio.run(bridge._main(dict(CAM), on_frame=marker_sink, idle_check=marker_stop))
+    assert seen == {"sink": marker_sink, "stop": marker_stop}

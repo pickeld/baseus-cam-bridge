@@ -19,6 +19,7 @@ from __future__ import annotations
 import hashlib
 import json
 import struct
+from dataclasses import dataclass
 from typing import Iterator
 
 MAGIC_TO_DEV = 0x55AA55AA
@@ -105,35 +106,100 @@ def parse_command_response(raw: bytes):
     cmd = struct.unpack_from("<H", raw, 14)[0]
     return cmd, entype, raw[24:24 + ln]
 
+def parse_av_header(buf: bytes, off: int = 0):
+    """Parse one 24-byte XM AV/command header. Returns a dict or None."""
+    if off + 24 > len(buf):
+        return None
+    magic, flags, vfm, fn, pkt_cnt, cur_pkt, dsize, command, timestamp = struct.unpack_from(
+        "<IBBHHHHHQ", buf, off)
+    if magic not in MAGICS:
+        return None
+    return {
+        "magic": magic,
+        "flags": flags,
+        "entype": flags & 0x0F,
+        "version": flags >> 4,
+        "vfm": vfm,
+        "fn": fn,
+        "pkt_cnt": pkt_cnt,
+        "cur_pkt": cur_pkt,
+        "dsize": dsize,
+        "command": command,
+        "timestamp": timestamp,
+    }
+
+
+def build_av_packet(payload: bytes, *, vfm: int = 1, fn: int = 1, pkt_cnt: int = 1,
+                    cur_pkt: int = 1, command: int = 0, timestamp: int = 0,
+                    entype: int = 0, version: int = 1, magic: int = MAGIC_TO_APP) -> bytes:
+    """Build a single-packet (or one part of a) video frame. No encryption."""
+    flags = ((version & 0x0F) << 4) | (entype & 0x0F)
+    header = struct.pack("<IBBHHHHHQ", magic, flags, vfm & 0xFF, fn & 0xFFFF,
+                         pkt_cnt & 0xFFFF, cur_pkt & 0xFFFF, len(payload) & 0xFFFF,
+                         command & 0xFFFF, int(timestamp) & 0xFFFFFFFFFFFFFFFF)
+    return header + payload
+
+
+@dataclass(frozen=True)
+class VideoFrame:
+    """One reassembled, decrypted Annex-B video frame plus XM header fields."""
+
+    data: bytes
+    vfm: int
+    fn: int
+    command: int
+    timestamp: int
+    entype: int
+    pkt_cnt: int
+    drw_channel: int = 1
+
+    @property
+    def hevc_flag(self) -> bool:
+        # Bit 15 is the SDK HEVC flag; it is not always set on HEVC payloads.
+        return bool(self.command & 0x8000)
+
 
 class VideoReassembler:
     """Turns a raw A/V byte stream into decrypted Annex-B video frames.
 
-    Feed arbitrary chunks via :meth:`feed`; it yields complete video frames.
-    Output is gated to start at the first SPS so a decoder can initialise.
-    Audio packets and the wrong-key SD-cache pre-roll are dropped automatically.
+    Feed arbitrary chunks via :meth:`feed` (bytes) or :meth:`feed_frames`
+    (VideoFrame). Output is gated to start at the first H.264 SPS or HEVC
+    VPS/SPS so a decoder can initialise. Audio packets and the wrong-key
+    SD-cache pre-roll are dropped automatically.
+
+    Partial frames are assembled per (fn, command, timestamp) so two
+    lenses muxed on one DRW channel are not dropped as "other substream".
     """
+
+    _MAX_PARTIAL = 8
 
     def __init__(self, key: bytes, start_on_sps: bool = True):
         self.key = key
         self.start_on_sps = start_on_sps
         self._buf = bytearray()
+        self._partial: dict[tuple, dict] = {}
+        self._started = not start_on_sps
+        self.frames = 0
+        self.emitted = 0
+        self._drw_channel = 1
+        # Backward-compat fields used by older callers.
         self._fbuf = bytearray()
         self._f_en = 0
         self._f_fn = -1
         self._f_next = 0
-        self._started = not start_on_sps
-        self.frames = 0
-        self.emitted = 0
 
-    def feed(self, chunk: bytes) -> Iterator[bytes]:
+    def feed(self, chunk: bytes, drw_channel: int = 1) -> Iterator[bytes]:
+        for frame in self.feed_frames(chunk, drw_channel=drw_channel):
+            yield frame.data
+
+    def feed_frames(self, chunk: bytes, drw_channel: int = 1) -> Iterator[VideoFrame]:
+        self._drw_channel = int(drw_channel)
         self._buf += chunk
-        # guard against unbounded growth on desync
         if len(self._buf) > 8 * 1024 * 1024:
             del self._buf[:-1024 * 1024]
         yield from self._parse()
 
-    def _parse(self) -> Iterator[bytes]:
+    def _parse(self) -> Iterator[VideoFrame]:
         buf = self._buf
         off = 0
         n = len(buf)
@@ -147,41 +213,55 @@ class VideoReassembler:
             dsize = struct.unpack_from("<H", buf, off + 12)[0]
             if off + 24 + dsize > n:
                 break
-            entype = buf[off + 4] & 0x0F
-            vfm = buf[off + 5]
-            fn = struct.unpack_from("<H", buf, off + 6)[0]
-            pkt_cnt = struct.unpack_from("<H", buf, off + 8)[0]
-            cur_pkt = struct.unpack_from("<H", buf, off + 10)[0]
+            hdr = parse_av_header(buf, off)
             payload = bytes(buf[off + 24:off + 24 + dsize])
             off += 24 + dsize
-            frame = self._feed_packet(entype, vfm, fn, pkt_cnt, cur_pkt, payload)
+            if hdr is None:
+                continue
+            frame = self._feed_packet(hdr, payload)
             if frame is not None:
                 yield frame
         del buf[:off]
 
-    def _feed_packet(self, entype, vfm, fn, pkt_cnt, cur_pkt, payload):
+    def _feed_packet(self, hdr: dict, payload: bytes):
+        vfm = hdr["vfm"]
         if vfm not in (1, 2):  # 1/2 = video; others = audio/other
             return None
+        fn = hdr["fn"]
+        pkt_cnt = hdr["pkt_cnt"]
+        cur_pkt = hdr["cur_pkt"]
+        key = (fn, hdr["command"], hdr["timestamp"], pkt_cnt, vfm)
         if cur_pkt == 1:
-            self._fbuf = bytearray(payload)
-            self._f_en = entype
-            self._f_fn = fn
-            self._f_next = 2
+            part = {
+                "buf": bytearray(payload),
+                "next": 2,
+                "hdr": hdr,
+                "drw": self._drw_channel,
+            }
+            self._partial[key] = part
+            if len(self._partial) > self._MAX_PARTIAL:
+                oldest = next(iter(self._partial))
+                if oldest != key:
+                    self._partial.pop(oldest, None)
             if pkt_cnt == 1:
-                self._f_next = 0
-                return self._finish(bytes(self._fbuf), entype)
-        elif self._f_next and cur_pkt == self._f_next and fn == self._f_fn:
-            self._fbuf += payload
-            self._f_next += 1
+                part["next"] = 0
+                self._partial.pop(key, None)
+                return self._finish(bytes(part["buf"]), hdr, part["drw"])
+            return None
+        part = self._partial.get(key)
+        if part is not None and cur_pkt == part["next"]:
+            part["buf"] += payload
+            part["next"] += 1
             if cur_pkt == pkt_cnt:
-                self._f_next = 0
-                return self._finish(bytes(self._fbuf), self._f_en)
-        else:
-            self._f_next = 0  # loss / other substream -> drop partial
+                self._partial.pop(key, None)
+                return self._finish(bytes(part["buf"]), part["hdr"], part["drw"])
+            return None
+        self._partial.pop(key, None)
         return None
 
-    def _finish(self, data: bytes, entype: int):
+    def _finish(self, data: bytes, hdr: dict, drw_channel: int):
         self.frames += 1
+        entype = hdr["entype"]
         if entype:
             if len(data) % 16:
                 return None
@@ -189,8 +269,100 @@ class VideoReassembler:
         if data[:1] != b"\x00":  # wrong-key / cached frame
             return None
         if not self._started:
-            if b"\x00\x00\x00\x01\x27" not in data[:8] and b"\x00\x00\x01\x27" not in data[:8]:
+            if not annexb_has_parameter_set(data):
                 return None
             self._started = True
         self.emitted += 1
-        return data
+        return VideoFrame(
+            data=data,
+            vfm=hdr["vfm"],
+            fn=hdr["fn"],
+            command=hdr["command"],
+            timestamp=hdr["timestamp"],
+            entype=entype,
+            pkt_cnt=hdr["pkt_cnt"],
+            drw_channel=int(drw_channel),
+        )
+
+
+def _iter_nal_starts(data: bytes):
+    i, n = 0, len(data)
+    while i + 3 < n:
+        if data[i:i + 4] == b"\x00\x00\x00\x01":
+            yield i + 4
+            i += 4
+            continue
+        if data[i:i + 3] == b"\x00\x00\x01":
+            yield i + 3
+            i += 3
+            continue
+        i += 1
+
+
+def annexb_has_parameter_set(data: bytes) -> bool:
+    """True if Annex-B data contains H.264 SPS (type 7) or HEVC VPS/SPS (32/33)."""
+    n = len(data)
+    for pos in _iter_nal_starts(data):
+        if pos >= n:
+            break
+        first = data[pos]
+        if (first & 0x80) == 0 and (first & 0x1F) == 7:
+            return True
+        if pos + 1 < n and (first & 1) == 0:
+            ntype = (first >> 1) & 63
+            if ntype in (32, 33):
+                return True
+    return False
+
+
+def annexb_codec_hint(data: bytes) -> str | None:
+    """Return 'h264', 'hevc', or None from parameter-set NALs."""
+    hints = set()
+    n = len(data)
+    for pos in _iter_nal_starts(data):
+        if pos >= n:
+            break
+        first = data[pos]
+        hevc = (pos + 1 < n and (first & 1) == 0
+                and (data[pos + 1] & 0xF8) == 0 and (data[pos + 1] & 7))
+        if (first & 0x80) == 0 and (first & 0x1F) in (7, 8) and not hevc:
+            hints.add("h264")
+        if hevc and ((first >> 1) & 63) in (32, 33, 34):
+            hints.add("hevc")
+    if len(hints) == 1:
+        return next(iter(hints))
+    return None
+
+
+def annexb_sps_fingerprint(data: bytes) -> str | None:
+    """Short hash of the first SPS NAL, or None."""
+    import hashlib
+    n = len(data)
+    starts = list(_iter_nal_starts(data))
+    for i, pos in enumerate(starts):
+        end = starts[i + 1] if i + 1 < len(starts) else n
+        # rewind over the start code we skipped; fingerprint the NAL payload
+        first = data[pos]
+        is_h264_sps = (first & 0x80) == 0 and (first & 0x1F) == 7
+        is_hevc_sps = (first & 1) == 0 and ((first >> 1) & 63) in (32, 33)
+        if is_h264_sps or is_hevc_sps:
+            return hashlib.sha1(data[pos:end]).hexdigest()[:8]
+    return None
+
+
+def annexb_nal_types(data: bytes) -> str:
+    """Comma-separated NAL type labels for a log line (no payloads)."""
+    labels = []
+    n = len(data)
+    for pos in _iter_nal_starts(data):
+        if pos >= n:
+            break
+        first = data[pos]
+        if (first & 1) == 0 and pos + 1 < n and (data[pos + 1] & 0xF8) == 0:
+            ntype = (first >> 1) & 63
+            labels.append({32: "vps", 33: "sps", 34: "pps", 19: "idr", 20: "idr",
+                           1: "slice"}.get(ntype, f"h{ntype}"))
+        else:
+            ntype = first & 0x1F
+            labels.append({7: "sps", 8: "pps", 5: "idr", 1: "slice"}.get(ntype, f"a{ntype}"))
+    return ",".join(labels) or "none"

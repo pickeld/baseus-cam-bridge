@@ -42,6 +42,8 @@ def main() -> None:
 
     # Reliability / latency options.
     os.environ["BASEUS_STREAM_TYPE"] = "1" if str(opts.get("stream_quality", "hd")).lower() == "sd" else "0"
+    os.environ["BASEUS_STILL_PORT"] = str(opts.get("still_port", 8099))
+    os.environ["BASEUS_STILL_BIND"] = str(opts.get("still_bind", "127.0.0.1") or "127.0.0.1")
     os.environ["BASEUS_ALWAYS_ON"] = "1" if opts.get("always_on", False) else "0"
     os.environ["BASEUS_START_TIMEOUT"] = str(opts.get("start_timeout", 60))
     os.environ["BASEUS_CLOSE_AFTER"] = str(opts.get("close_after", 30))

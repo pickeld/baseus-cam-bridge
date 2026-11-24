@@ -6,7 +6,8 @@ Sequence (matches the official app for battery cameras):
   2. MQTT ``WatchDevice`` wake, if the camera record has wake inputs
   3. wait for the hole-punched peer
   4. XM login (cmd 1) -> open video (cmd 2) -> heartbeat every few seconds
-  5. reassemble/decrypt the video channel and hand each frame to ``sink``
+  5. reassemble/decrypt the video channel and hand each ``VideoFrame`` to
+     ``sink`` (the dual-lens hub demuxes left/right from it)
 
 Runs in a plain thread (the PPCS session is blocking). All logs are redacted.
 """
@@ -211,7 +212,7 @@ def stream(session, cam: dict, sink, *, should_stop=None, clock=time.monotonic) 
         if channel != VIDEO_CHANNEL:
             continue
         try:
-            for frame in reasm.feed(chunk):
+            for frame in reasm.feed_frames(chunk, drw_channel=channel):
                 sink(frame)
         except (BrokenPipeError, ValueError):
             return "sink_closed"
@@ -222,12 +223,15 @@ def stream(session, cam: dict, sink, *, should_stop=None, clock=time.monotonic) 
 
 
 def run(cam: dict, sink=None, *, should_stop=None) -> str:
-    """Connect, stream to ``sink`` (default: Annex-B on stdout), always close."""
+    """Connect, stream to ``sink`` (default: Annex-B on stdout), always close.
+
+    ``should_stop`` lets the dual-lens hub end the session when idle.
+    """
     if sink is None:
         out = sys.stdout.buffer
 
         def sink(frame):
-            out.write(frame)
+            out.write(frame.data)
             out.flush()
     log("connecting via cloud PPCS (P2P server rendezvous + hole punch)")
     session = connect(cam)

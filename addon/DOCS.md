@@ -20,6 +20,8 @@ only contacted while something is watching.
 | `start_timeout` | `60` | Seconds to wait for a camera's first frame before giving up. Raise if cameras wake slowly. |
 | `close_after` | `30` | Seconds to keep a stream warm after the last viewer leaves. Higher = faster re-opens, more battery/bandwidth. Ignored when `always_on` is set. |
 | `transport` | `auto` | How the bridge reaches a camera. `auto`: one LAN discovery attempt, then cloud PPCS. `lan`: LAN discovery only (original behaviour). `cloud`: cloud PPCS only (P2P-server rendezvous + hole punch, with an MQTT wake for battery cameras). |
+| `still_port` | `8099` | HTTP port for still JPEGs. `0` disables the still server. |
+| `still_bind` | `127.0.0.1` | Address for the still server. Leave on localhost unless you have a reason to change it. |
 
 Example:
 
@@ -35,6 +37,8 @@ stream_quality: hd
 always_on: false
 start_timeout: 60
 close_after: 30
+still_port: 8099
+still_bind: "127.0.0.1"
 ```
 
 ### Tuning for reliability / faster loading
@@ -54,13 +58,37 @@ Home Assistant host:
 
 | Port | Protocol | Use |
 |---|---|---|
-| 8554 | TCP | RTSP — `rtsp://homeassistant.local:8554/<camera>` |
+| 8554 | TCP | RTSP — `rtsp://homeassistant.local:8554/<camera>` and `<camera>-right` |
 | 8888 | TCP | HLS — `http://homeassistant.local:8888/<camera>/index.m3u8` |
 | 8889 | TCP | WebRTC — `http://homeassistant.local:8889/<camera>` |
 | 8189 | UDP | WebRTC ICE |
+| 8099 | TCP | Still JPEG on `127.0.0.1` — `http://127.0.0.1:8099/<camera>.jpg` and `<camera>-right.jpg` |
 
 Host networking is required so the bridge can reach the cameras' P2P transport on
 your LAN.
+
+
+## Dual-lens cameras and Generic Camera
+
+X1 Pro Dual cameras publish two paths from one P2P session: `<slug>` (left)
+and `<slug>-right` (right). Add a Home Assistant **Generic Camera** for each
+lens:
+
+- Still Image URL: `http://127.0.0.1:8099/<slug>.jpg` (or `<slug>-right.jpg`)
+- Stream Source URL: `rtsp://homeassistant.local:8554/<slug>` (or `<slug>-right`)
+
+The still server listens on localhost only by default. A cache miss returns a
+placeholder immediately; a real JPEG is filled from a live IDR after the
+stream has been opened once.
+
+Video is often HEVC/H.265. It plays in HEVC-capable clients (Safari, VLC).
+Many Chromium browsers will not play it. There is no H.264 transcode.
+
+On single-lens cameras the right path is still created but will time out if
+you open it.
+
+The HACS integration creates one entity per camera name. Use Generic Camera
+for the second lens.
 
 ## Using with the HACS integration
 

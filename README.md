@@ -18,8 +18,11 @@ login/device-list call to the Baseus cloud (the same call the official app makes
 ## What you get
 
 - One RTSP URL per camera, e.g. `rtsp://<host>:8554/living-room`
+- For **X1 Pro Dual** cameras, a second path for the right lens:
+  `rtsp://<host>:8554/living-room-right` (both lenses share one P2P session)
 - The same feeds as HLS (`http://<host>:8888/<cam>/index.m3u8`) and WebRTC
   (`http://<host>:8889/<cam>`)
+- Local still JPEGs (left and right) at `http://127.0.0.1:8099/<cam>.jpg`
 - Automatic discovery of **all** cameras on your account
 - Battery-friendly: a camera is only contacted while something is watching it
 
@@ -35,7 +38,7 @@ runs on the HA host itself:
 3. Install **Baseus Cam Bridge**, open **Configuration**, enter your Baseus
    account + password, and **Start**.
 
-Streams are then at `rtsp://homeassistant.local:8554/<camera>`. Pair it with the
+Streams are then at `rtsp://homeassistant.local:8554/<camera>` and, for dual-lens models, `.../<camera>-right`. Pair it with the
 [Baseus Security HACS integration](https://github.com/pickeld/baseus-home-assistant)
 for camera entities and sensors. See [`addon/DOCS.md`](addon/DOCS.md).
 
@@ -198,6 +201,27 @@ camera (P2P/LAN)  -->  bridge (Python)  -->  ffmpeg  -->  MediaMTX  -->  rtsp://
 See [`docs/PROTOCOL.md`](docs/PROTOCOL.md) for protocol notes.
 
 ---
+
+
+## Dual-lens cameras (X1 Pro Dual)
+
+Some Baseus models mux both lenses on a single P2P session. The bridge splits
+them using bit 14 (`0x4000`) of the XM AV header `command` field:
+
+| Lens | RTSP | Still (on the HA / bridge host) |
+|---|---|---|
+| Left | `rtsp://<host>:8554/<slug>` | `http://127.0.0.1:8099/<slug>.jpg` |
+| Right | `rtsp://<host>:8554/<slug>-right` | `http://127.0.0.1:8099/<slug>-right.jpg` |
+
+Single-lens cameras still work on `<slug>`. Opening `<slug>-right` on a
+single-lens camera will time out. X1 Pro video is HEVC/H.265; it plays in
+clients that support HEVC (for example Safari or VLC). Many Chromium browsers
+will not play it, and this project does not transcode to H.264.
+
+In Home Assistant, add a **Generic Camera** for each lens (stream URL + still
+URL). The still endpoint binds to `127.0.0.1` by default so it is not exposed
+on the LAN. A cache miss returns a placeholder immediately; a real still is
+filled from a live IDR after someone has watched the stream.
 
 ## Troubleshooting
 
