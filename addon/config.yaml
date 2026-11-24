@@ -27,6 +27,7 @@ options:
   region: AUTO
   country_code: "1"
   include_offline: true
+  transport: auto
   framerate: 25
   stream_quality: hd
   always_on: false
@@ -38,6 +39,7 @@ schema:
   region: list(AUTO|US|EU|AU)
   country_code: str
   include_offline: bool
+  transport: list(auto|lan|cloud)?
   framerate: int(1,60)
   stream_quality: list(hd|sd)
   always_on: bool
