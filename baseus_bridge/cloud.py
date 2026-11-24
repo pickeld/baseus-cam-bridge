@@ -6,6 +6,8 @@ com.xmitech.xmapi):
   1. Baseus native login -> auth token
      POST https://baseus-<region>-auth-gw.baseussecurity.com/api/auth/account/login
   2. XMitech GetUserDeviceList (same token) -> devices, cameras, p2p_password, LAN IP
+  3. XMitech GetUserMQTTS (same token) -> per-account MQTT broker settings, used
+     only to wake battery cameras before a cloud-brokered PPCS connect
 
 No credentials are stored on disk by this module; callers pass them in.
 """
@@ -123,11 +125,17 @@ class Camera:
     model: str = ""
     online: bool = True
     is_homebase_child: bool = False
+    # Cloud PPCS rendezvous + MQTT wake inputs (see ppcs.py / wake.py).
+    service_string: str = ""   # encoded P2P server list (+ optional transport key)
+    wake_key: str = ""         # WatchDevice wake key (secret)
+    product_id: str = ""
     extra: dict = field(default_factory=dict)
 
     def redacted(self) -> dict:
         d = self.__dict__.copy()
         d["p2p_password"] = "***"
+        d["wake_key"] = "***" if self.wake_key else ""
+        d["service_string"] = "***" if self.service_string else ""
         d.pop("extra", None)
         return d
 
@@ -246,6 +254,21 @@ class BaseusCloud:
                                data=b"{}", timeout=self.timeout)
         return r.json()
 
+    def mqtt_config(self) -> dict:
+        """Read-only GetUserMQTTS: broker settings for the MQTT wake.
+
+        The result holds credentials; callers must not log it.
+        """
+        resp = self._xm_post("GetUserMQTTS", {})
+        payload = resp.get("payload") if isinstance(resp, dict) else None
+        if not isinstance(payload, dict):
+            raise CloudError("GetUserMQTTS: unexpected payload")
+        missing = [k for k in ("host", "port", "client_id", "username", "password",
+                               "publish", "subscribe") if k not in payload]
+        if missing:
+            raise CloudError("GetUserMQTTS: incomplete config")
+        return payload
+
     # --- writable controls ---
     def _xm_post(self, action: str, body_obj: dict) -> dict:
         """Signed XM request for an arbitrary Action (same envelope as reads)."""
@@ -325,6 +348,12 @@ class BaseusCloud:
             device_sn = dev.get("device_sn") or ""
             p2p_password = plat.get("p2p_password") or ""
             device_did = plat.get("device_did") or ""
+            ppcs = {
+                "service_string": plat.get("service_string") or "",
+                "wake_key": plat.get("wake_key") or "",
+                "product_id": (dev.get("product_id") or info.get("product_id")
+                               or plat.get("product_id") or ""),
+            }
             channels = info.get("CameraChannel") or []
             children = {c.get("child_sn"): c for c in (dev.get("child_list") or [])}
 
@@ -359,7 +388,7 @@ class BaseusCloud:
                         channel=int(ch.get("channel", 0)), camera_sn=cam_sn,
                         device_did=device_did, model=ch.get("model") or "",
                         online=online, is_homebase_child=True,
-                        extra=extra,
+                        extra=extra, **ppcs,
                     ))
             else:  # standalone camera == the device itself
                 name = dev.get("device_name") or device_sn
@@ -369,6 +398,6 @@ class BaseusCloud:
                     channel=0, camera_sn=device_sn, device_did=device_did,
                     model=dev.get("device_model") or "",
                     online=bool(dev.get("online_status", 1)), is_homebase_child=False,
-                    extra={"device_info": info},
+                    extra={"device_info": info}, **ppcs,
                 ))
         return cams

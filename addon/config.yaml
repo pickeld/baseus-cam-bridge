@@ -27,8 +27,11 @@ options:
   region: AUTO
   country_code: "1"
   include_offline: true
+  transport: auto
   framerate: 25
   stream_quality: hd
+  still_port: 8099
+  still_bind: "127.0.0.1"
   always_on: false
   start_timeout: 60
   close_after: 30
@@ -38,8 +41,11 @@ schema:
   region: list(AUTO|US|EU|AU)
   country_code: str
   include_offline: bool
+  transport: list(auto|lan|cloud)?
   framerate: int(1,60)
   stream_quality: list(hd|sd)
+  still_port: int(0,65535)?
+  still_bind: str?
   always_on: bool
   start_timeout: int(10,180)
   close_after: int(0,600)

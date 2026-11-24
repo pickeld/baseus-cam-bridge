@@ -20,6 +20,7 @@ from .cloud import BaseusCloud
 
 RUNTIME_DIR = Path(os.environ.get("BASEUS_RUNTIME_DIR", "/run/baseus"))
 CAMERAS_FILE = Path(os.environ.get("BASEUS_CAMERAS_FILE", str(RUNTIME_DIR / "cameras.json")))
+MQTT_FILE = Path(os.environ.get("BASEUS_MQTT_FILE", str(RUNTIME_DIR / "mqtt.json")))
 MEDIAMTX_CFG = Path(os.environ.get("BASEUS_MEDIAMTX_CFG", str(RUNTIME_DIR / "mediamtx.yml")))
 MEDIAMTX_BIN = os.environ.get("MEDIAMTX_BIN", "mediamtx")
 
@@ -54,12 +55,37 @@ def _cloud_from_env() -> BaseusCloud:
     )
 
 
-def discover() -> list:
+def discover(*, with_mqtt: bool = False) -> list:
     cloud = _cloud_from_env()
     cloud.login()
     cams = cloud.discover_cameras()
     log(f"[cloud] logged in via {cloud.resolved_region}; found {len(cams)} camera(s)")
+    if with_mqtt:
+        _write_mqtt_file(cloud, cams)
     return cams
+
+
+def _write_mqtt_file(cloud: BaseusCloud, cams: list) -> None:
+    """Save the account MQTT settings (mode 600) for the battery-camera wake.
+
+    Only fetched when some camera has a wake key. Failure is not fatal: the
+    cloud PPCS path simply connects without waking first.
+    """
+    if os.environ.get("BASEUS_TRANSPORT", "auto").strip().lower() == "lan":
+        return
+    if not any(getattr(c, "wake_key", "") for c in cams):
+        return
+    try:
+        settings = cloud.mqtt_config()
+    except Exception as err:  # noqa: BLE001 - optional feature
+        log(f"[cloud] MQTT wake settings unavailable ({type(err).__name__}); wake disabled")
+        return
+    RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+    fd = os.open(MQTT_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        json.dump(settings, fh)
+    os.chmod(MQTT_FILE, stat.S_IRUSR | stat.S_IWUSR)  # 600 even if it existed
+    log("[cloud] MQTT wake settings saved")
 
 
 def _write_cameras_file(cams: list) -> list[dict]:
@@ -71,15 +97,11 @@ def _write_cameras_file(cams: list) -> list[dict]:
 
 
 def _run_on_demand_cmd(slug: str) -> str:
+    # slug is unused: MediaMTX expands $MTX_PATH to this path (including -right).
     py = shlex.quote(sys.executable)
-    bridge = f"{py} -m baseus_bridge.bridge --camera $MTX_PATH"
-    ff = (
-        "ffmpeg -hide_banner -loglevel warning -fflags +genpts "
-        "-analyzeduration 3M -probesize 3M "
-        f"-f h264 -framerate {FRAMERATE} -i - -c:v copy "
-        "-f rtsp -rtsp_transport tcp rtsp://localhost:$RTSP_PORT/$MTX_PATH"
-    )
-    return f"sh -c {shlex.quote(f'{bridge} | {ff}')}"
+    # The publisher starts or joins a shared hub so both lenses share one P2P
+    # session, and picks h264 vs hevc from the live stream.
+    return f"{py} -m baseus_bridge.bridge --camera $MTX_PATH --publish"
 
 
 def _render_mediamtx_cfg(records: list[dict]) -> str:
@@ -100,22 +122,24 @@ def _render_mediamtx_cfg(records: list[dict]) -> str:
         "paths:",
     ]
     for rec in records:
-        slug = rec["slug"]
-        cmd = _run_on_demand_cmd(slug)
-        lines.append(f"  {slug}:")
-        if ALWAYS_ON:
-            # Keep the stream up from startup and restart it if it drops.
-            lines += [
-                f"    runOnInit: {json.dumps(cmd)}",
-                "    runOnInitRestart: yes",
-            ]
-        else:
-            lines += [
-                f"    runOnDemand: {json.dumps(cmd)}",
-                "    runOnDemandRestart: yes",
-                f"    runOnDemandStartTimeout: {START_TIMEOUT}s",
-                f"    runOnDemandCloseAfter: {CLOSE_AFTER}s",
-            ]
+        # Left = <slug>, right = <slug>-right. Single-lens cameras simply
+        # never emit right frames; that path will time out if opened.
+        for slug in (rec["slug"], f"{rec['slug']}-right"):
+            cmd = _run_on_demand_cmd(slug)
+            lines.append(f"  {slug}:")
+            if ALWAYS_ON:
+                # Keep the stream up from startup and restart it if it drops.
+                lines += [
+                    f"    runOnInit: {json.dumps(cmd)}",
+                    "    runOnInitRestart: yes",
+                ]
+            else:
+                lines += [
+                    f"    runOnDemand: {json.dumps(cmd)}",
+                    "    runOnDemandRestart: yes",
+                    f"    runOnDemandStartTimeout: {START_TIMEOUT}s",
+                    f"    runOnDemandCloseAfter: {CLOSE_AFTER}s",
+                ]
     lines.append("")
     return "\n".join(lines)
 
@@ -127,7 +151,7 @@ def serve():
     last_err = None
     for attempt in range(1, 6):
         try:
-            cams = discover()
+            cams = discover(with_mqtt=True)
             break
         except Exception as err:  # noqa: BLE001 - report and retry
             last_err = err
@@ -142,12 +166,33 @@ def serve():
         raise SystemExit("no cameras discovered (nothing to serve)")
     records = _write_cameras_file(cams)
     MEDIAMTX_CFG.write_text(_render_mediamtx_cfg(records))
-    log(f"[serve] wrote {len(records)} path(s) to {MEDIAMTX_CFG}")
+    path_count = len(records) * 2
+    log(f"[serve] wrote {path_count} path(s) to {MEDIAMTX_CFG} (left + right per camera)")
+    still_port = int(os.environ.get("BASEUS_STILL_PORT", "8099") or 0)
+    still_bind = os.environ.get("BASEUS_STILL_BIND", "127.0.0.1")
     for rec in records:
         status = "online" if rec["online"] else "OFFLINE"
-        log(f"   rtsp://<host>:{RTSP_PORT}/{rec['slug']:<20} {rec['name']} [{status}]")
+        log(f"   rtsp://<host>:{RTSP_PORT}/{rec['slug']:<20} {rec['name']} left  [{status}]")
+        log(f"   rtsp://<host>:{RTSP_PORT}/{rec['slug']+'-right':<20} {rec['name']} right [{status}]")
+        if still_port > 0:
+            log(f"   still http://{still_bind}:{still_port}/{rec['slug']}.jpg")
+            log(f"   still http://{still_bind}:{still_port}/{rec['slug']}-right.jpg")
+    if still_port > 0:
+        # Must not exec MediaMTX: that would kill this process and the still thread.
+        from .still_http import start_still_server
+        start_still_server(still_bind, still_port, log=log)
     log(f"[serve] starting MediaMTX ({MEDIAMTX_BIN})")
-    os.execvp(MEDIAMTX_BIN, [MEDIAMTX_BIN, str(MEDIAMTX_CFG)])
+    import signal
+    import subprocess
+    proc = subprocess.Popen([MEDIAMTX_BIN, str(MEDIAMTX_CFG)])
+
+    def _stop(signum, _frame):
+        if proc.poll() is None:
+            proc.terminate()
+
+    signal.signal(signal.SIGTERM, _stop)
+    signal.signal(signal.SIGINT, _stop)
+    raise SystemExit(proc.wait())
 
 
 def print_discovery():
