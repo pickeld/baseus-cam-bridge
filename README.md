@@ -169,6 +169,7 @@ All settings are environment variables (see `.env.example`):
 | `BASEUS_RTSP_PORT` | `8554` | RTSP port |
 | `BASEUS_HLS_PORT` | `8888` | HLS port |
 | `BASEUS_WEBRTC_PORT` | `8889` | WebRTC port |
+| `BASEUS_TRANSPORT` | `auto` | `auto` (one LAN discovery attempt, then cloud PPCS), `lan` (LAN discovery only, the original behaviour) or `cloud` (cloud PPCS only) |
 
 Your credentials live only in `.env` (git-ignored) and a runtime file inside the
 container (`tmpfs`, mode 600). Nothing sensitive is written to the repo.
@@ -186,6 +187,11 @@ camera (P2P/LAN)  -->  bridge (Python)  -->  ffmpeg  -->  MediaMTX  -->  rtsp://
 
 - `baseus_bridge.cloud` performs the same login + device-list as the app.
 - `baseus_bridge.bridge` holds one camera's live session and outputs H.264.
+  It reaches the camera either by LAN discovery (aiopppp) or, for cameras that
+  never answer LAN search, through `baseus_bridge.ppcs`: the same P2P-server
+  rendezvous + UDP hole punch the app uses, with an MQTT `WatchDevice` wake
+  (`baseus_bridge.wake`) for battery cameras. Video still flows directly
+  between the camera and the bridge; only the rendezvous uses the cloud.
 - `baseus_bridge.orchestrator` writes a MediaMTX config where each camera is a
   `runOnDemand` path, so bridges start only when a client connects.
 
@@ -200,6 +206,10 @@ See [`docs/PROTOCOL.md`](docs/PROTOCOL.md) for protocol notes.
 - **Stream won't open** — the camera may be offline/asleep (battery models wake on
   demand; give it ~10–15s on first connect). Confirm the host can reach the
   camera's LAN IP.
+- **`discovery attempt 1/3 failed` on every open** — some models (seen on X1
+  Pro) never answer LAN discovery. Set `BASEUS_TRANSPORT=cloud` (or leave
+  `auto`) so the bridge connects through the P2P servers instead. The log then
+  shows `PPCS peer ready ...`, `login ok` and `video requested over cloud PPCS`.
 - **Docker on macOS/Windows** — `network_mode: host` behaves differently there;
   a Linux host is strongly recommended for LAN P2P.
 

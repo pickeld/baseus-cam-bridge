@@ -5,6 +5,13 @@ cloud-provided credentials, opens the live stream, decrypts each frame and
 writes a clean Annex-B H.264 elementary stream to stdout. Pipe stdout into
 ffmpeg to publish RTSP/HLS/WebRTC (see the orchestrator / MediaMTX config).
 
+Transports (``BASEUS_TRANSPORT``):
+  * ``lan``   -- aiopppp LAN discovery of the cloud-reported IP (original path)
+  * ``cloud`` -- cloud-brokered PPCS hole punch + MQTT wake (``cloud_p2p``),
+                 for cameras that never answer LAN search (e.g. X1 Pro)
+  * ``auto``  -- (default) one LAN discovery attempt, then cloud PPCS if the
+                 camera record has the rendezvous data
+
 All logging goes to stderr so stdout stays a pure video byte stream.
 
 Credentials are resolved (in order):
@@ -29,6 +36,8 @@ from aiopppp.types import Channel
 from . import protocol as P
 
 KEEPALIVE_SEC = 20
+# lan | cloud | auto (see module docstring)
+TRANSPORT = os.environ.get("BASEUS_TRANSPORT", "auto").strip().lower() or "auto"
 CAMERAS_FILE = os.environ.get("BASEUS_CAMERAS_FILE", "/run/baseus/cameras.json")
 # 0 = main/HD stream, 1 = sub/SD stream. SD is lighter and often loads faster.
 STREAM_TYPE = int(os.environ.get("BASEUS_STREAM_TYPE", "0"))
@@ -195,18 +204,49 @@ def resolve_camera(args) -> dict:
     }
 
 
-async def _main(cam: dict, monitor: bool = False):
+async def _find_on_lan(cam: dict, attempts: int):
+    if not cam.get("host"):
+        log(">>> no LAN IP in the camera record; skipping LAN discovery")
+        return None
     log(f"discovering {cam['host']} ...")
-    device = None
-    for attempt in range(1, 4):
+    for attempt in range(1, attempts + 1):
         try:
-            device = await find_device(cam["host"], timeout=10)
-            break
+            return await find_device(cam["host"], timeout=10)
         except Exception as e:  # noqa: BLE001 - report and retry
-            log(f">>> discovery attempt {attempt}/3 failed: {e}")
+            log(f">>> discovery attempt {attempt}/{attempts} failed: {e}")
             await asyncio.sleep(1)
+    return None
+
+
+def _transport_for(cam: dict, monitor: bool) -> str:
+    from .cloud_p2p import can_use
+    mode = TRANSPORT if TRANSPORT in ("auto", "lan", "cloud") else "auto"
+    if monitor:
+        return "lan"  # command monitor is implemented on the aiopppp session only
+    if mode != "lan" and not can_use(cam):
+        if mode == "cloud":
+            log(">>> cloud PPCS needs device_did + service_string; falling back to LAN")
+        return "lan"
+    return mode
+
+
+async def _main(cam: dict, monitor: bool = False):
+    mode = _transport_for(cam, monitor)
+    device = None
+    if mode != "cloud":
+        device = await _find_on_lan(cam, 3 if mode == "lan" else 1)
     if device is None:
-        raise SystemExit("device discovery failed after retries")
+        if mode == "lan":
+            raise SystemExit("device discovery failed after retries")
+        if mode == "auto":
+            log(">>> LAN discovery failed; trying cloud PPCS")
+        from . import cloud_p2p
+        try:
+            status = await asyncio.to_thread(cloud_p2p.run, cam)
+        except Exception as e:  # noqa: BLE001 - PpcsError, socket errors
+            raise SystemExit(f"cloud PPCS connect failed: {e}")
+        log(f">>> session ended ({status})")
+        return
     log(f"device: {device.dev_id}")
     session = None
 

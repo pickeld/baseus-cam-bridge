@@ -38,6 +38,7 @@ CMD_CLOSEVIDEO = 3
 CMD_DEVINFO = 100
 CMD_GET_CAMERA_LIST = 376
 CMD_HOMEBASE_LIVE_ENABLE = 390
+CMD_HEARTBEAT = 2001
 
 
 def md5hex(s: str) -> str:
@@ -60,12 +61,26 @@ def aes_decrypt(key: bytes, data: bytes) -> bytes:
     return pt
 
 
-def build_command(cmd: int, payload: bytes) -> bytes:
-    """Build a 24-byte-header app->device command frame."""
+def aes_encrypt(key: bytes, data: bytes) -> bytes:
+    """AES-ECB/PKCS7 encrypt (XM EnType 1)."""
+    pad = 16 - (len(data) % 16)
+    return AES.new(key, AES.MODE_ECB).encrypt(data + bytes([pad]) * pad)
+
+
+def build_command(cmd: int, payload: bytes, *, key: bytes | None = None,
+                  model: int = 210) -> bytes:
+    """Build a 24-byte-header app->device command frame.
+
+    With ``key`` the payload is AES-encrypted and EnType is set to 1 (what the
+    app sends over the cloud-brokered PPCS session). ``model`` is the frame
+    model byte: 210 (0xD2) for normal commands, 0xE0 for the empty heartbeat.
+    """
+    if key is not None:
+        payload = aes_encrypt(key, payload)
     h = bytearray(24)
     h[0:4] = struct.pack("<I", MAGIC_TO_DEV)
-    h[4] = 0x10
-    h[5:7] = struct.pack("<H", 210)
+    h[4] = 0x10 | (1 if key is not None else 0)
+    h[5:7] = struct.pack("<H", model & 0xFF)
     h[8:10] = struct.pack("<H", 1)
     h[10:12] = struct.pack("<H", 1)
     h[12:14] = struct.pack("<H", len(payload))

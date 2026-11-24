@@ -38,6 +38,7 @@ def main() -> None:
     os.environ["BASEUS_COUNTRYCODE"] = str(opts.get("country_code", "1"))
     os.environ["BASEUS_FRAMERATE"] = str(opts.get("framerate", 25))
     os.environ["BASEUS_INCLUDE_OFFLINE"] = "1" if opts.get("include_offline", True) else "0"
+    os.environ["BASEUS_TRANSPORT"] = str(opts.get("transport", "auto"))
 
     # Reliability / latency options.
     os.environ["BASEUS_STREAM_TYPE"] = "1" if str(opts.get("stream_quality", "hd")).lower() == "sd" else "0"

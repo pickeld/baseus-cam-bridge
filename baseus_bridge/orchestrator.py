@@ -20,6 +20,7 @@ from .cloud import BaseusCloud
 
 RUNTIME_DIR = Path(os.environ.get("BASEUS_RUNTIME_DIR", "/run/baseus"))
 CAMERAS_FILE = Path(os.environ.get("BASEUS_CAMERAS_FILE", str(RUNTIME_DIR / "cameras.json")))
+MQTT_FILE = Path(os.environ.get("BASEUS_MQTT_FILE", str(RUNTIME_DIR / "mqtt.json")))
 MEDIAMTX_CFG = Path(os.environ.get("BASEUS_MEDIAMTX_CFG", str(RUNTIME_DIR / "mediamtx.yml")))
 MEDIAMTX_BIN = os.environ.get("MEDIAMTX_BIN", "mediamtx")
 
@@ -54,12 +55,37 @@ def _cloud_from_env() -> BaseusCloud:
     )
 
 
-def discover() -> list:
+def discover(*, with_mqtt: bool = False) -> list:
     cloud = _cloud_from_env()
     cloud.login()
     cams = cloud.discover_cameras()
     log(f"[cloud] logged in via {cloud.resolved_region}; found {len(cams)} camera(s)")
+    if with_mqtt:
+        _write_mqtt_file(cloud, cams)
     return cams
+
+
+def _write_mqtt_file(cloud: BaseusCloud, cams: list) -> None:
+    """Save the account MQTT settings (mode 600) for the battery-camera wake.
+
+    Only fetched when some camera has a wake key. Failure is not fatal: the
+    cloud PPCS path simply connects without waking first.
+    """
+    if os.environ.get("BASEUS_TRANSPORT", "auto").strip().lower() == "lan":
+        return
+    if not any(getattr(c, "wake_key", "") for c in cams):
+        return
+    try:
+        settings = cloud.mqtt_config()
+    except Exception as err:  # noqa: BLE001 - optional feature
+        log(f"[cloud] MQTT wake settings unavailable ({type(err).__name__}); wake disabled")
+        return
+    RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+    fd = os.open(MQTT_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        json.dump(settings, fh)
+    os.chmod(MQTT_FILE, stat.S_IRUSR | stat.S_IWUSR)  # 600 even if it existed
+    log("[cloud] MQTT wake settings saved")
 
 
 def _write_cameras_file(cams: list) -> list[dict]:
@@ -127,7 +153,7 @@ def serve():
     last_err = None
     for attempt in range(1, 6):
         try:
-            cams = discover()
+            cams = discover(with_mqtt=True)
             break
         except Exception as err:  # noqa: BLE001 - report and retry
             last_err = err

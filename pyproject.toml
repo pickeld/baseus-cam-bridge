@@ -10,6 +10,7 @@ dependencies = [
     "aiopppp==0.2.3",
     "pycryptodome>=3.20",
     "requests>=2.31",
+    "paho-mqtt>=2.0",
 ]
 
 [project.scripts]
@@ -21,3 +22,7 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 packages = ["baseus_bridge"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
